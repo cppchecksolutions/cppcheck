@@ -5726,8 +5726,6 @@ bool Tokenizer::simplifyTokenList1(const char FileName[])
     if (Settings::terminated())
         return false;
 
-    simplifyVariableMultipleAssign();
-
     // Collapse operator name tokens into single token
     // operator = => operator=
     simplifyOperatorName();
@@ -7394,36 +7392,6 @@ void Tokenizer::simplifyStaticConst()
         }
         if (continue2)
             continue;
-    }
-}
-
-void Tokenizer::simplifyVariableMultipleAssign()
-{
-    for (Token *tok = list.front(); tok; tok = tok->next()) {
-        if (Token::Match(tok, "%name% = %name% = %num%|%name% ;")) {
-            // skip intermediate assignments
-            Token *tok2 = tok->previous();
-            while (tok2 &&
-                   tok2->str() == "=" &&
-                   Token::Match(tok2->previous(), "%name%")) {
-                tok2 = tok2->tokAt(-2);
-            }
-
-            if (!tok2 || tok2->str() != ";") {
-                continue;
-            }
-
-            Token *stopAt = tok->tokAt(2);
-            const Token *valueTok = stopAt->tokAt(2);
-            const std::string& value(valueTok->str());
-            tok2 = tok2->next();
-
-            while (tok2 != stopAt) {
-                tok2->next()->insertToken(";");
-                tok2->next()->insertToken(value);
-                tok2 = tok2->tokAt(4);
-            }
-        }
     }
 }
 
