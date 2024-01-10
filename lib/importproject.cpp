@@ -349,75 +349,67 @@ bool ImportProject::importCompileCommands(std::istream &istr)
         return false;
     }
 
-    for (const picojson::value &fileInfo : compileCommands.get<picojson::array>()) {
-        picojson::object obj = fileInfo.get<picojson::object>();
-        std::string dirpath = Path::fromNativeSeparators(obj["directory"].get<std::string>());
+    try {
+        for (const picojson::value &fileInfo : compileCommands.get<picojson::array>()) {
+            const picojson::object& obj = fileInfo.get<picojson::object>();
 
-        /* CMAKE produces the directory without trailing / so add it if not
-         * there - it is needed by setIncludePaths() */
-        if (!endsWith(dirpath, '/'))
-            dirpath += '/';
+            std::string dirpath = Path::fromNativeSeparators(cppcheck::read<std::string>(obj, "directory"));
 
-        const std::string directory = dirpath;
+            /* CMAKE produces the directory without trailing / so add it if not
+             * there - it is needed by setIncludePaths() */
+            if (!endsWith(dirpath, '/'))
+                dirpath += '/';
 
-        std::string command;
-        if (obj.count("arguments")) {
-            if (obj["arguments"].is<picojson::array>()) {
-                for (const picojson::value& arg : obj["arguments"].get<picojson::array>()) {
-                    if (arg.is<std::string>()) {
-                        std::string str = arg.get<std::string>();
-                        if (str.find(' ') != std::string::npos)
-                            str = "\"" + str + "\"";
-                        command += str + " ";
-                    }
+            const std::string directory = dirpath;
+
+            std::string command;
+            if (obj.count("arguments")) {
+                for (std::string arg: cppcheck::readOptionalArray<std::string>(obj, "arguments")) {
+                    if (arg.find(' ') != std::string::npos)
+                        arg = "\"" + arg + "\"";
+                    command += (command.empty() ? "" : " ") + arg;
                 }
+            } else if (obj.count("command")) {
+                command = cppcheck::read<std::string>(obj, "command");
             } else {
-                printError("'arguments' field in compilation database entry is not a JSON array");
+                printError("no 'arguments' or 'command' field found in compilation database entry");
                 return false;
             }
-        } else if (obj.count("command")) {
-            if (obj["command"].is<std::string>()) {
-                command = obj["command"].get<std::string>();
-            } else {
-                printError("'command' field in compilation database entry is not a string");
+
+            const std::string file = Path::fromNativeSeparators(cppcheck::readOptional<std::string>(obj,"file"));
+            if (file.empty()) {
+                printError("skip compilation database entry because it does not have a proper 'file' field");
+                continue;
+            }
+
+            // Accept file?
+            if (!Path::acceptFile(file))
+                continue;
+
+            FileSettings fs;
+            if (Path::isAbsolute(file))
+                fs.filename = Path::simplifyPath(file);
+    #ifdef _WIN32
+            else if (file[0] == '/' && directory.size() > 2 && std::isalpha(directory[0]) && directory[1] == ':')
+                // directory: C:\foo\bar
+                // file: /xy/z.c
+                // => c:/xy/z.c
+                fs.filename = Path::simplifyPath(directory.substr(0,2) + file);
+    #endif
+            else
+                fs.filename = Path::simplifyPath(directory + file);
+            if (!sourceFileExists(fs.filename)) {
+                printError("'" + fs.filename + "' from compilation database does not exist");
                 return false;
             }
-        } else {
-            printError("no 'arguments' or 'command' field found in compilation database entry");
-            return false;
+            fsParseCommand(fs, command); // read settings; -D, -I, -U, -std, -m*, -f*
+            std::map<std::string, std::string, cppcheck::stricmp> variables;
+            fsSetIncludePaths(fs, directory, fs.includePaths, variables);
+            fileSettings.push_back(std::move(fs));
         }
-
-        if (!obj.count("file") || !obj["file"].is<std::string>()) {
-            printError("skip compilation database entry because it does not have a proper 'file' field");
-            continue;
-        }
-
-        const std::string file = Path::fromNativeSeparators(obj["file"].get<std::string>());
-
-        // Accept file?
-        if (!Path::acceptFile(file))
-            continue;
-
-        FileSettings fs;
-        if (Path::isAbsolute(file))
-            fs.filename = Path::simplifyPath(file);
-#ifdef _WIN32
-        else if (file[0] == '/' && directory.size() > 2 && std::isalpha(directory[0]) && directory[1] == ':')
-            // directory: C:\foo\bar
-            // file: /xy/z.c
-            // => c:/xy/z.c
-            fs.filename = Path::simplifyPath(directory.substr(0,2) + file);
-#endif
-        else
-            fs.filename = Path::simplifyPath(directory + file);
-        if (!sourceFileExists(fs.filename)) {
-            printError("'" + fs.filename + "' from compilation database does not exist");
-            return false;
-        }
-        fsParseCommand(fs, command); // read settings; -D, -I, -U, -std, -m*, -f*
-        std::map<std::string, std::string, cppcheck::stricmp> variables;
-        fsSetIncludePaths(fs, directory, fs.includePaths, variables);
-        fileSettings.push_back(std::move(fs));
+    } catch (const cppcheck::JsonError& e) {
+        printError(std::string("Failed to parse compilation database. ") + e.what());
+        return false;
     }
 
     return true;

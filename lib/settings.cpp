@@ -66,67 +66,24 @@ std::string Settings::loadCppcheckCfg()
             return "not a valid JSON - " + lastErr;
     }
     const picojson::object& obj = json.get<picojson::object>();
-    {
-        const picojson::object::const_iterator it = obj.find("productName");
-        if (it != obj.cend()) {
-            const auto& v = it->second;
-            if (!v.is<std::string>())
-                return "'productName' is not a string";
-            cppcheckCfgProductName = v.get<std::string>();
+
+    try {
+        cppcheckCfgProductName = cppcheck::readOptional<std::string>(obj, "productName");
+        cppcheckCfgAbout = cppcheck::readOptional<std::string>(obj, "about");
+        for (const std::string& addon: cppcheck::readOptionalArray<std::string>(obj, "addons")) {
+            if (!Path::isAbsolute(addon))
+                addons.emplace(Path::join(Path::getPathFromFilename(fileName), addon));
+            else
+                addons.emplace(addon);
         }
-    }
-    {
-        const picojson::object::const_iterator it = obj.find("about");
-        if (it != obj.cend()) {
-            const auto& v = it->second;
-            if (!v.is<std::string>())
-                return "'about' is not a string";
-            cppcheckCfgAbout = v.get<std::string>();
+        for (const std::string& s: cppcheck::readOptionalArray<std::string>(obj, "suppressions")) {
+            const std::string err = nomsg.addSuppressionLine(s);
+            if (!err.empty())
+                return "could not parse suppression '" + s + "' - " + err;
         }
-    }
-    {
-        const picojson::object::const_iterator it = obj.find("addons");
-        if (it != obj.cend()) {
-            const auto& entry = it->second;
-            if (!entry.is<picojson::array>())
-                return "'addons' is not an array";
-            for (const picojson::value &v : entry.get<picojson::array>())
-            {
-                if (!v.is<std::string>())
-                    return "'addons' array entry is not a string";
-                const std::string &s = v.get<std::string>();
-                if (!Path::isAbsolute(s))
-                    addons.emplace(Path::join(Path::getPathFromFilename(fileName), s));
-                else
-                    addons.emplace(s);
-            }
-        }
-    }
-    {
-        const picojson::object::const_iterator it = obj.find("suppressions");
-        if (it != obj.cend()) {
-            const auto& entry = it->second;
-            if (!entry.is<picojson::array>())
-                return "'suppressions' is not an array";
-            for (const picojson::value &v : entry.get<picojson::array>())
-            {
-                if (!v.is<std::string>())
-                    return "'suppressions' array entry is not a string";
-                const std::string &s = v.get<std::string>();
-                const std::string err = nomsg.addSuppressionLine(s);
-                if (!err.empty())
-                    return "could not parse suppression '" + s + "' - " + err;
-            }
-        }
-    }
-    {
-        const picojson::object::const_iterator it = obj.find("safety");
-        if (it != obj.cend()) {
-            const auto& v = it->second;
-            if (!v.is<bool>())
-                return "'safety' is not a bool";
-            safety = safety || v.get<bool>();
-        }
+        safety |= cppcheck::readOptional<bool>(obj, "safety");
+    } catch (const cppcheck::JsonError& e) {
+        return e.what();
     }
 
     return "";

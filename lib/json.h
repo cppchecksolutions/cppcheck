@@ -20,6 +20,8 @@
 #define jsonH
 
 #include "config.h"
+#include <stdexcept>
+#include <string>
 
 SUPPRESS_WARNING_PUSH("-Wfloat-equal")
 SUPPRESS_WARNING_CLANG_PUSH("-Wtautological-type-limit-compare")
@@ -33,5 +35,73 @@ SUPPRESS_WARNING_CLANG_POP
 SUPPRESS_WARNING_CLANG_POP
 SUPPRESS_WARNING_CLANG_POP
 SUPPRESS_WARNING_POP
+
+namespace cppcheck {
+    class JsonError : public std::runtime_error {
+    public:
+        explicit JsonError(const std::string& msg) : std::runtime_error(msg) {}
+    };
+
+    template<class T>
+    std::string typeName() {
+        if (std::is_same<T, std::string>::value)
+            return "string";
+        else if (std::is_same<T, bool>::value)
+            return "boolean";
+        else if (std::is_same<T, int64_t>::value)
+            return "integer";
+        else if (std::is_same<T, picojson::object>::value)
+            return "object";
+        else if (std::is_same<T, picojson::array>::value)
+            return "array";
+        return "unknown";
+    }
+
+    template<class T>
+    T read(const picojson::object &obj, const std::string& name) {
+        const auto it = obj.find(name);
+        if (it == obj.cend())
+            throw JsonError("'" + name + "' does not exist.");
+        const auto& val = it->second;
+        if (!val.is<T>())
+            throw JsonError("'" + name + "' is not a " + typeName<T>() + ".");
+        return val.get<T>();
+    }
+
+    template<class T>
+    T readOptional(const picojson::object &obj, const std::string& name, T defaultValue = T()) {
+        const auto it = obj.find(name);
+        if (it == obj.cend())
+            return defaultValue;
+        const auto& val = it->second;
+        if (!val.is<T>())
+            throw JsonError("'" + name + "' is not a " + typeName<T>() + ".");
+        return val.get<T>();
+    }
+
+    template<class T>
+    std::vector<T> readOptionalArray(const picojson::object &obj, const std::string& name) {
+        const auto it = obj.find(name);
+        if (it == obj.cend())
+            return {};
+        const auto& arr = it->second;
+        if (!arr.is<picojson::array>())
+            throw JsonError("'" + name + "' is not an array.");
+        std::vector<T> result;
+        for (const picojson::value &val: arr.get<picojson::array>()) {
+            if (!val.is<T>())
+                throw JsonError("'" + name + "' entry is not a " + typeName<T>() + ".");
+            result.push_back(val.get<T>());
+        }
+        return result;
+    }
+
+
+    bool readOptionalBool(const picojson::object &obj, const std::string& name, bool defaultValue=false);
+    std::string readOptionalString(const picojson::object &obj, const std::string& name, const std::string defaultValue = "");
+    int64_t readInt(const picojson::object &obj, const std::string& name);
+    std::string readString(const picojson::object &obj, const std::string& name);
+    std::vector<std::string> readOptionalStringArray(const picojson::object &obj, const std::string& name);
+}
 
 #endif // jsonH

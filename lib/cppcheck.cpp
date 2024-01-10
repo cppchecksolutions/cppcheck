@@ -241,11 +241,11 @@ static std::string detectPython(const CppCheck::ExecuteCmdFn &executeCommand)
     return "";
 }
 
-static std::vector<picojson::value> executeAddon(const AddonInfo &addonInfo,
-                                                 const std::string &defaultPythonExe,
-                                                 const std::string &file,
-                                                 const std::string &premiumArgs,
-                                                 const CppCheck::ExecuteCmdFn &executeCommand)
+static std::vector<std::string> executeAddon(const AddonInfo &addonInfo,
+                                             const std::string &defaultPythonExe,
+                                             const std::string &file,
+                                             const std::string &premiumArgs,
+                                             const CppCheck::ExecuteCmdFn &executeCommand)
 {
     const std::string redirect = "2>&1";
 
@@ -290,7 +290,7 @@ static std::vector<picojson::value> executeAddon(const AddonInfo &addonInfo,
         throw InternalError(nullptr, message, details);
     }
 
-    std::vector<picojson::value> addonResult;
+    std::vector<std::string> addonResult;
 
     // Validate output..
     std::istringstream istr(result);
@@ -315,20 +315,7 @@ static std::vector<picojson::value> executeAddon(const AddonInfo &addonInfo,
             throw InternalError(nullptr, "Failed to execute '" + pythonExe + " " + args + "'. " + result);
         }
 
-        //std::cout << "addon '" << addonInfo.name <<  "' result is " << line << std::endl;
-
-        // TODO: make these failures?
-        picojson::value res;
-        const std::string err = picojson::parse(res, line);
-        if (!err.empty()) {
-            //std::cout << "addon '" << addonInfo.name <<  "' result is not a valid JSON (" << err << ")" << std::endl;
-            continue;
-        }
-        if (!res.is<picojson::object>()) {
-            //std::cout << "addon '" << addonInfo.name <<  "' result is not a JSON object" << std::endl;
-            continue;
-        }
-        addonResult.emplace_back(std::move(res));
+        addonResult.emplace_back(line);
     }
 
     // Valid results
@@ -1435,55 +1422,71 @@ void CppCheck::executeAddons(const std::vector<std::string>& files, const std::s
         if (addonInfo.name != "misra" && !addonInfo.ctu && endsWith(files.back(), ".ctu-info"))
             continue;
 
-        const std::vector<picojson::value> results =
+        const std::vector<std::string> results =
             executeAddon(addonInfo, mSettings.addonPython, fileList.empty() ? files[0] : fileList, mSettings.premiumArgs, mExecuteCommand);
 
         const bool misraC2023 = mSettings.premiumArgs.find("--misra-c-2023") != std::string::npos;
 
-        for (const picojson::value& res : results) {
+        for (const std::string& res: results) {
             // TODO: get rid of copy?
             // this is a copy so we can access missing fields and get a default value
-            picojson::object obj = res.get<picojson::object>();
 
-            ErrorMessage errmsg;
-
-            if (obj.count("file") > 0) {
-                std::string fileName = obj["file"].get<std::string>();
-                const int64_t lineNumber = obj["linenr"].get<int64_t>();
-                const int64_t column = obj["column"].get<int64_t>();
-                errmsg.callStack.emplace_back(std::move(fileName), lineNumber, column);
-            } else if (obj.count("loc") > 0) {
-                for (const picojson::value &locvalue: obj["loc"].get<picojson::array>()) {
-                    picojson::object loc = locvalue.get<picojson::object>();
-                    std::string fileName = loc["file"].get<std::string>();
-                    const int64_t lineNumber = loc["linenr"].get<int64_t>();
-                    const int64_t column = loc["column"].get<int64_t>();
-                    const std::string info = loc["info"].get<std::string>();
-                    errmsg.callStack.emplace_back(std::move(fileName), info, lineNumber, column);
+            try {
+                picojson::value jsonroot;
+                {
+                    const std::string err = picojson::parse(jsonroot, res);
+                    if (!err.empty())
+                        throw cppcheck::JsonError(err);
+                    if (!jsonroot.is<picojson::object>())
+                        throw cppcheck::JsonError("root is not a JSON object");
                 }
-            }
 
-            errmsg.id = obj["addon"].get<std::string>() + "-" + obj["errorId"].get<std::string>();
-            if (misraC2023 && startsWith(errmsg.id, "misra-c2012-"))
-                errmsg.id = "misra-c2023-" + errmsg.id.substr(12);
-            const std::string text = obj["message"].get<std::string>();
-            errmsg.setmsg(text);
-            const std::string severity = obj["severity"].get<std::string>();
-            errmsg.severity = severityFromString(severity);
-            if (errmsg.severity == Severity::none || errmsg.severity == Severity::internal) {
-                if (!endsWith(errmsg.id, "-logChecker"))
-                    continue;
-                errmsg.severity = Severity::internal;
-            }
-            else if (!mSettings.severity.isEnabled(errmsg.severity)) {
-                // Do not filter out premium misra/cert/autosar messages that has been
-                // explicitly enabled with a --premium option
-                if (!isPremiumCodingStandardId(errmsg.id))
-                    continue;
-            }
-            errmsg.file0 = file0;
+                picojson::object obj = jsonroot.get<picojson::object>();
 
-            reportErr(errmsg);
+                ErrorMessage errmsg;
+
+                if (obj.count("file") > 0) {
+                    std::string fileName = cppcheck::read<std::string>(obj, "file");
+                    const int64_t lineNumber = cppcheck::read<int64_t>(obj, "linenr");
+                    const int64_t column = cppcheck::read<int64_t>(obj, "column");
+                    errmsg.callStack.emplace_back(std::move(fileName), lineNumber, column);
+                } else if (obj.count("loc") > 0) {
+                    for (const picojson::object &loc: cppcheck::readOptionalArray<picojson::object>(obj, "loc")) {
+                        std::string fileName = cppcheck::read<std::string>(loc, "file");
+                        const int64_t lineNumber = cppcheck::read<int64_t>(loc, "linenr");
+                        const int64_t column = cppcheck::read<int64_t>(loc, "column");
+                        const std::string info = cppcheck::read<std::string>(loc, "info");
+                        errmsg.callStack.emplace_back(std::move(fileName), info, lineNumber, column);
+                    }
+                }
+
+                errmsg.id = cppcheck::read<std::string>(obj, "addon");
+                if (misraC2023 && errmsg.id == "misra-c2012")
+                    errmsg.id = "misra-c2023";
+                errmsg.id += "-" + cppcheck::read<std::string>(obj, "errorId");
+                const std::string text = cppcheck::read<std::string>(obj, "message");
+                errmsg.setmsg(text);
+                const std::string severity = cppcheck::read<std::string>(obj, "severity");
+                errmsg.severity = severityFromString(severity);
+                if (errmsg.severity == Severity::none || errmsg.severity == Severity::internal) {
+                    if (!endsWith(errmsg.id, "-logChecker"))
+                        continue;
+                    errmsg.severity = Severity::internal;
+                }
+                else if (!mSettings.severity.isEnabled(errmsg.severity))
+                    continue;
+                errmsg.file0 = file0;
+
+                reportErr(errmsg);
+            } catch (const cppcheck::JsonError& e) {
+                ErrorMessage errmsg;
+                errmsg.id = "internalError";
+                errmsg.callStack.emplace_back(file0, 0, 0);
+                errmsg.setmsg("Addon " + addonInfo.name + " generated invalid JSON: " + e.what() + "; result:" + res);
+                errmsg.severity = Severity::error;
+
+                reportErr(errmsg);
+            }
         }
     }
 }

@@ -47,78 +47,41 @@ static std::string getFullPath(const std::string &fileName, const std::string &e
 }
 
 static std::string parseAddonInfo(AddonInfo& addoninfo, const picojson::value &json, const std::string &fileName, const std::string &exename) {
-    const std::string& json_error = picojson::get_last_error();
-    if (!json_error.empty()) {
-        return "Loading " + fileName + " failed. " + json_error;
-    }
-    if (!json.is<picojson::object>())
-        return "Loading " + fileName + " failed. JSON is not an object.";
 
-    // TODO: remove/complete default value handling for missing fields
-    const picojson::object& obj = json.get<picojson::object>();
-    {
-        const auto it = obj.find("args");
-        if (it != obj.cend()) {
-            const auto& val = it->second;
-            if (!val.is<picojson::array>())
-                return "Loading " + fileName + " failed. 'args' must be an array.";
-            for (const picojson::value &v : val.get<picojson::array>()) {
-                if (!v.is<std::string>())
-                    return "Loading " + fileName + " failed. 'args' entry is not a string.";
-                addoninfo.args += " " + v.get<std::string>();
-            }
-        }
-    }
+    try {
+        const std::string& json_error = picojson::get_last_error();
+        if (!json_error.empty())
+            throw cppcheck::JsonError(json_error);
+        if (!json.is<picojson::object>())
+            throw cppcheck::JsonError("JSON is not an object.");
 
-    {
-        const auto it = obj.find("ctu");
-        if (it != obj.cend()) {
-            const auto& val = it->second;
-            // ctu is specified in the config file
-            if (!val.is<bool>())
-                return "Loading " + fileName + " failed. 'ctu' must be a boolean.";
-            addoninfo.ctu = val.get<bool>();
+        // TODO: remove/complete default value handling for missing fields
+        const picojson::object& obj = json.get<picojson::object>();
+
+        for (const std::string& arg: cppcheck::readOptionalArray<std::string>(obj, "args")) {
+            if (!addoninfo.args.empty())
+                addoninfo.args += " ";
+            addoninfo.args += arg;
         }
+
+        addoninfo.ctu = cppcheck::readOptional<bool>(obj, "ctu");
+        addoninfo.python = cppcheck::readOptional<std::string>(obj, "python");
+        addoninfo.executable = cppcheck::readOptional<std::string>(obj, "executable");
+        const std::string& script = cppcheck::readOptional<std::string>(obj, "script");
+        // Either "executable" or "script" must be specified
+        if (addoninfo.executable.empty() == script.empty())
+            throw cppcheck::JsonError("Either 'executable' or 'script' must be specified.");
+        if (!addoninfo.executable.empty())
+            addoninfo.executable = getFullPath(addoninfo.executable, fileName);
         else {
-            addoninfo.ctu = false;
+            if (!endsWith(script, ".py"))
+                throw cppcheck::JsonError("'script' must end with .py");
+            return addoninfo.getAddonInfo(script, exename);
         }
+    } catch (const cppcheck::JsonError& e) {
+        return "Failed to parse " + fileName + ". " + e.what();
     }
-
-    {
-        const auto it = obj.find("python");
-        if (it != obj.cend()) {
-            const auto& val = it->second;
-            // Python was defined in the config file
-            if (!val.is<std::string>()) {
-                return "Loading " + fileName +" failed. 'python' must be a string.";
-            }
-            addoninfo.python = val.get<std::string>();
-        }
-        else {
-            addoninfo.python = "";
-        }
-    }
-
-    {
-        const auto it = obj.find("executable");
-        if (it != obj.cend()) {
-            const auto& val = it->second;
-            if (!val.is<std::string>())
-                return "Loading " + fileName + " failed. 'executable' must be a string.";
-            addoninfo.executable = getFullPath(val.get<std::string>(), fileName);
-            return ""; // TODO: why bail out?
-        }
-    }
-
-    const auto it = obj.find("script");
-    if (it == obj.cend())
-        return "Loading " + fileName + " failed. 'script' is missing.";
-
-    const auto& val = it->second;
-    if (!val.is<std::string>())
-        return "Loading " + fileName + " failed. 'script' must be a string.";
-
-    return addoninfo.getAddonInfo(val.get<std::string>(), exename);
+    return "";
 }
 
 std::string AddonInfo::getAddonInfo(const std::string &fileName, const std::string &exename) {

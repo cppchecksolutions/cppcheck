@@ -599,7 +599,9 @@ namespace {
 }
 
 struct SEstimateSize {
-    inline const QString& get() const { return m; }
+    inline const QString& get() const {
+        return m;
+    }
     QString m;
 };
 
