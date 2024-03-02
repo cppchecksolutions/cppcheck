@@ -2786,27 +2786,27 @@ class MisraChecker:
             self.reportError(expr, 12, 4)
         elif expr.str == '*' and op1 * op2 > max_value:
             self.reportError(expr, 12, 4)
-    def misra_12_4(self, cfg):
-        if not cfg.tokenlist:
-            return
-        expr = cfg.tokenlist[0]
-        while expr.next:
-            expr = expr.next
-            if expr.str == "?" and expr.astOperand2.str == ":":
-                known_value = expr.astOperand1.getKnownIntValue()
-                if known_value == 1:
-                    tok = expr
-                    while tok != expr.astOperand2:
-                        self.misra_12_4_check_expr(tok)
-                        tok = tok.next
-                    expr = tok
-                    while expr.str not in (";", "{", "}"):
-                        expr = expr.next
-                    continue
-                elif known_value == 0:
-                    expr = expr.astOperand2
-            self.misra_12_4_check_expr(expr)
 
+    def misra_12_4(self, cfg):
+        for expr in cfg.tokenlist:
+            if expr.astParent is None and (expr.astOperand1 or expr.astOperand2):
+                tokens = [expr]
+                while tokens:
+                    e = tokens.pop()
+                    if e is None:
+                        continue
+                    if e.str in '+-*':
+                        self.misra_12_4_check_expr(e)
+                    tokens.append(e.astOperand1)
+                    if e.str == '?' and e.astOperand1 and simpleMatch(e.astOperand2, ':'):
+                        known_value = e.astOperand1.getKnownIntValue()
+                        if known_value is not None:
+                            if known_value == 0:
+                                tokens.append(e.astOperand2.astOperand2)
+                            else:
+                                tokens.append(e.astOperand2.astOperand1)
+                            continue
+                    tokens.append(e.astOperand2)
 
     def misra_13_1(self, data):
         for token in data.tokenlist:
