@@ -670,7 +670,7 @@ unsigned int CppCheck::checkClang(const FileWithDetails &file)
     }
 #endif
 
-    const std::string args2 = "-fsyntax-only -Xclang -ast-dump -fno-color-diagnostics " +
+    const std::string args2 = "-fsyntax-only -Xclang -ast-dump=json -fno-color-diagnostics " +
                               getClangFlags(Path::identify(file.spath(), mSettings.cppHeaderProbe)) +
                               file.spath();
     const std::string redirect2 = clangStderr.empty() ? "2>&1" : ("2> " + clangStderr);
@@ -715,8 +715,7 @@ unsigned int CppCheck::checkClang(const FileWithDetails &file)
     try {
         Tokenizer tokenizer(mSettings, mErrorLogger);
         tokenizer.list.appendFileIfNew(file.spath());
-        std::istringstream ast(output2);
-        clangimport::parseClangAstDump(tokenizer, ast);
+        clangimport::parseClangAstDump(tokenizer, output2);
         ValueFlow::setValues(tokenizer.list,
                              const_cast<SymbolDatabase&>(*tokenizer.getSymbolDatabase()),
                              mErrorLogger,

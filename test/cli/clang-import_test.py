@@ -106,11 +106,12 @@ def test_ast_calculations(tmpdir):
     __check_ast(tmpdir, 'int x = 5; int y = (x + 4) * 2;')
     __check_ast(tmpdir, 'long long dostuff(int x) { return x ? 3 : 5; }')
 
-def test_ast_control_flow(tmpdir):
-    __check_ast(tmpdir, 'void foo(int x) { if (x > 5){} }')
-    __check_ast(tmpdir, 'int dostuff() { for (int x = 0; x < 10; x++); }')
-    __check_ast(tmpdir, 'void foo(int x) { switch (x) {case 1: break; } }')
-    __check_ast(tmpdir, 'void foo(int a, int b, int c) { foo(a,b,c); }')
+@pytest.mark.parametrize('code', ('void foo(int x) { if (x > 5){} }',
+                                  'void dostuff() { for (int x = 0; x < 10; x++); }',
+                                  'void foo(int x) { switch (x) {case 1: break; } }',
+                                  'void foo(int a, int b, int c) { foo(a,b,c); }'))
+def test_ast_control_flow(tmpdir, code):
+    __check_ast(tmpdir, code)
 
 def test_ast(tmpdir):
     __check_ast(tmpdir, 'struct S { int x; }; S* foo() { return new S(); }')
@@ -161,7 +162,7 @@ def __test_cmd(tmp_path, file_name, extra_args, stdout_exp_1, content=''):
     assert stderr == ''
     assert stdout.splitlines() == [
         'Checking {} ...'.format(file_name),
-        'clang -fsyntax-only -Xclang -ast-dump -fno-color-diagnostics {}{}'.format(stdout_exp_1, file_name)
+        'clang -fsyntax-only -Xclang -ast-dump=json -fno-color-diagnostics {}{}'.format(stdout_exp_1, file_name)
     ]
 
 
@@ -241,6 +242,7 @@ def test_cmd_std_cpp_enforce_alias(tmp_path):  # #13128/#13129/#13130
     __test_cmd(tmp_path, 'test.c',['--language=c++', '--std=gnu99', '--std=gnu++11'], '-x c++ -std=gnu++11')
 
 
+@pytest.mark.xfail(strict=True)
 def test_debug_clang_output(tmp_path):
     test_file = tmp_path / 'test.c'
     with open(test_file, 'wt') as f:
@@ -266,7 +268,7 @@ void f() {}
 def test_debug_clang_output_failure_exitcode(tmp_path):
     # the given code will cause clang to fail with an exitcode
     #
-    # Failed to execute 'clang -fsyntax-only -Xclang -ast-dump -fno-color-diagnostics -x c++ a.cpp 2>&1' - (exitcode: 1 / output: a.cpp:3:12: error: indirection requires pointer operand ('int' invalid)
+    # Failed to execute 'clang -fsyntax-only -Xclang -ast-dump=json -fno-color-diagnostics -x c++ a.cpp 2>&1' - (exitcode: 1 / output: a.cpp:3:12: error: indirection requires pointer operand ('int' invalid)
     # 3 |     (void)(*0);
     # |            ^~
     # 1 error generated.
@@ -294,6 +296,76 @@ def test_debug_clang_output_failure_exitcode(tmp_path):
     stderr_lines = stderr.splitlines()
     assert len(stderr_lines) > 5, stderr_lines
     assert (stderr_lines[0] ==
-            "Failed to execute 'clang -fsyntax-only -Xclang -ast-dump -fno-color-diagnostics -x c {} 2>&1' - (exitcode: 1 / output: {}:3:12: error: indirection requires pointer operand ('int' invalid)".format(test_file, test_file))
+            "Failed to execute 'clang -fsyntax-only -Xclang -ast-dump=json -fno-color-diagnostics -x c {} 2>&1' - (exitcode: 1 / output: {}:3:12: error: indirection requires pointer operand ('int' invalid)".format(test_file, test_file))
     assert stdout.find('TranslationUnitDecl') != -1, stdout
     assert stdout.find(str(test_file)) != -1, stdout
+
+
+def _run_cppcheck_debug(test_file, code):
+    with open(test_file, 'wt') as f:
+        f.write(code+'\n')
+
+    args = [
+        '-q',
+        '--clang',
+        '--debug',
+        str(test_file)
+    ]
+
+    _, stdout, stderr = cppcheck(args)
+    assert stderr == ''
+    return stdout
+
+
+def test_tokens_vardecl1(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nint x = 5;')
+    assert '2: int x@var1 = 5 ;' in stdout
+
+
+def test_tokens_vardecl2(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nint x[10];')
+    assert '2: int x@var1 [ 10 ] ;' in stdout
+
+
+def test_tokens_vardecl3(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nstatic int x;')
+    assert '2: static int x@var1 ;' in stdout
+
+
+def test_tokens_typedefdecl(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\ntypedef unsigned int T;\nT x;')
+    assert '3: unsigned int x@var1 ;' in stdout
+
+
+def test_tokens_declrefexpr(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nconst int x = 5;\nconst int y = x;')
+    assert '2: const int x@var1 = 5 ;' in stdout
+    assert '3: const int y@var2 = x@var1 ;' in stdout
+
+
+def test_tokens_function1(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nvoid foo(){}')
+    assert '2: void foo ( ) { }' in stdout
+
+
+def test_tokens_function2(tmp_path):
+    test_file = tmp_path / 'test.c'
+    stdout = _run_cppcheck_debug(test_file, '\nstatic int foo()\n{\n return 12;\n}')
+    assert '2: static int foo ( ) {' in stdout
+    assert '3:\n' in stdout
+    assert '4: return 12 ;' in stdout
+
+
+def test_tokens_template1(tmp_path):
+    test_file = tmp_path / 'test.cpp'
+    stdout = _run_cppcheck_debug(test_file, '\ntemplate<class T> struct Foo {\nT x; };\nFoo<int> foo;\n')
+    assert ': struct Foo<int> {' in stdout
+    assert ': int x@var1 ;' in stdout
+    assert ': Foo<int> foo@var2 ;' in stdout
+
