@@ -302,6 +302,9 @@ public:
     /** @brief Using -E for debugging purposes */
     bool preprocessOnly{};
 
+    /** @brief experimental handling of *.proto files */
+    bool markupProtobuf{};
+
     /** @brief Is --quiet given? */
     bool quiet{};
 

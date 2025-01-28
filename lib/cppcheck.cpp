@@ -861,6 +861,10 @@ unsigned int CppCheck::checkFile(const FileWithDetails& file, const std::string 
 
     mLogger->resetExitCode();
 
+    if (mSettings.markupProtobuf && endsWith(file.spath(), ".pb.cc")) {
+        return mLogger->exitcode();
+    }
+
     if (Settings::terminated())
         return mLogger->exitcode();
 

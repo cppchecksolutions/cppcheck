@@ -78,6 +78,10 @@ void CheckUnusedFunctions::parseTokens(const Tokenizer &tokenizer, const Setting
             if (!func || !func->token)
                 continue;
 
+            if (settings.markupProtobuf && endsWith(tokenizer.list.file(func->token), ".pb.h")) {
+                continue;
+            }
+
             // Don't warn about functions that are marked by __attribute__((constructor)) or __attribute__((destructor))
             if (func->isAttributeConstructor() || func->isAttributeDestructor() || func->type != Function::eFunction || func->isOperator())
                 continue;

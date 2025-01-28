@@ -1193,6 +1193,10 @@ CmdLineParser::Result CmdLineParser::parseFromArgs(int argc, const char* const a
                     project.ignoreOtherConfigs(mVSConfig);
             }
 
+            // --markup=protobuf
+            else if (std::strcmp(argv[i], "--markup=protobuf") == 0)
+                mSettings.markupProtobuf = true;
+
             // Only print something when there are errors
             else if (std::strcmp(argv[i], "-q") == 0 || std::strcmp(argv[i], "--quiet") == 0)
                 mSettings.quiet = true;
