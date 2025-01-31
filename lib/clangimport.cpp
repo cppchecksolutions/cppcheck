@@ -475,7 +475,7 @@ std::string clangimport::AstNode::getTemplateParameters() const
 void clangimport::AstNode::dumpAst(int num, int indent) const
 {
     (void)num;
-    std::cout << std::string(indent, ' ') << mKind;
+    std::cout << std::string(indent, ' ') << mKind << " " << mJsonObject.at("id").get<std::string>() << " " << getSpelling();
     // JSON for (const auto& tok: mExtTokens)
     // JSON    std::cout << " " << tok;
     std::cout << std::endl;
@@ -873,15 +873,15 @@ Token *clangimport::AstNode::createTokens(TokenList &tokenList)
         return nullptr;
     }
     if (mKind == CXXForRangeStmt) {
-        /*JSON
         Token *forToken = addtoken(tokenList, "for");
         Token *par1 = addtoken(tokenList, "(");
         AstNodePtr varDecl;
-        if (children[6]->mKind == DeclStmt)
-            varDecl = getChild(6)->getChild(0);
-        else
-            varDecl = getChild(5)->getChild(0);
-        varDecl->mExtTokens.pop_back();
+        for (auto it = children.rbegin(); it != children.rend(); ++it) {
+            if ((*it)->mKind == DeclStmt) {
+                varDecl = (*it)->getChild(0);
+                break;
+            }
+        }
         varDecl->children.clear();
         Token *expr1 = varDecl->createTokens(tokenList);
         Token *colon = addtoken(tokenList, ":");
@@ -906,7 +906,7 @@ Token *clangimport::AstNode::createTokens(TokenList &tokenList)
         par1->astOperand2(colon);
 
         createScope(tokenList, Scope::ScopeType::eFor, children.back(), forToken);
-        */
+
         return nullptr;
     }
     if (mKind == CXXMethodDecl) {
