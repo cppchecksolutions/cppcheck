@@ -362,6 +362,12 @@ def test_tokens_function2(tmp_path):
     assert '4: return 12 ;' in stdout
 
 
+def test_tokens_for(tmp_path):
+    test_file = tmp_path / 'test.cpp'
+    stdout = _run_cppcheck_debug(test_file, '\nint buf[10]; void foo() { for (int i:buf){} }')
+    assert '2: int buf@var1 [ 10 ] ; void foo ( ) { for ( int i@var2 :@exprUNIQUE buf@var1 ) { } }' in stdout
+
+
 def test_tokens_template1(tmp_path):
     test_file = tmp_path / 'test.cpp'
     stdout = _run_cppcheck_debug(test_file, '\ntemplate<class T> struct Foo {\nT x; };\nFoo<int> foo;\n')
