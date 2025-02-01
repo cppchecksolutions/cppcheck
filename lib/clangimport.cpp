@@ -414,9 +414,11 @@ namespace clangimport {
 
 std::string clangimport::AstNode::getSpelling() const
 {
-    if (mJsonObject.count("name") == 0)
-        return {};
-    return mJsonObject.at("name").get<std::string>();
+    if (mJsonObject.count("opcode") > 0)
+        return mJsonObject.at("opcode").get<std::string>();
+    if (mJsonObject.count("name") > 0)
+        return mJsonObject.at("name").get<std::string>();
+    return {};
 }
 
 std::string clangimport::AstNode::getQualType() const
@@ -751,7 +753,7 @@ Token *clangimport::AstNode::createTokens(TokenList &tokenList)
     }
     if (mKind == BinaryOperator) {
         Token *tok1 = getChild(0)->createTokens(tokenList);
-        Token *binop = addtoken(tokenList, mJsonObject.at("opcode").get<std::string>());
+        Token *binop = addtoken(tokenList, getSpelling());
         Token *tok2 = children[1]->createTokens(tokenList);
         binop->astOperand1(tok1);
         binop->astOperand2(tok2);
@@ -1249,16 +1251,16 @@ Token *clangimport::AstNode::createTokens(TokenList &tokenList)
         return addtoken(tokenList, getSpelling());
     }
     if (mKind == UnaryOperator) {
-        const std::string& opcode = mJsonObject.at("opcode").get<std::string>();
+        const std::string& spelling = getSpelling();
         const bool postfix = mJsonObject.count("isPostfix") > 0 && mJsonObject.at("isPostfix").get<bool>();
         if (postfix) {
             Token* tok = getChild(0)->createTokens(tokenList);
-            Token *unaryOp = addtoken(tokenList, opcode);
+            Token *unaryOp = addtoken(tokenList, spelling);
             setValueType(unaryOp);
             unaryOp->astOperand1(tok);
             return unaryOp;
         } else {
-            Token *unaryOp = addtoken(tokenList, opcode);
+            Token *unaryOp = addtoken(tokenList, spelling);
             setValueType(unaryOp);
             unaryOp->astOperand1(getChild(0)->createTokens(tokenList));
             return unaryOp;
