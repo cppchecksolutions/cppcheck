@@ -364,7 +364,7 @@ def test_tokens_function2(tmp_path):
 def test_tokens_function3(tmp_path):
     test_file = tmp_path / 'test.cpp'
     stdout = _run_cppcheck_debug(test_file, '\nint x; void foo(){ x |= 1 << 30; }')
-    assert '2: int ...void foo ( int x@var1 , int y@var2 ) { }' in stdout
+    assert '2: int x@var1 ; void foo ( ) { x@var1 |=@exprUNIQUE 1 <<@exprUNIQUE 30 ; }\n' in stdout
 
 def test_tokens_for(tmp_path):
     test_file = tmp_path / 'test.cpp'
