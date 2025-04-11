@@ -1645,6 +1645,18 @@ void TemplateSimplifier::expandTemplate(
     const bool isSpecialization = templateDeclaration.isSpecialization();
     const bool isVariable = templateDeclaration.isVariable();
 
+    if (templateDeclaration.name() == "Slice") {
+        std::cout << "Instantiating Slice" << std::endl;
+        std::cout << "  newName:" << newName << std::endl;
+        const Token* tok = templateInstantiation.token();
+        std::cout << "  " << mTokenizer.list.getFiles().at(tok->fileIndex())
+                  << ":" << tok->linenr() << ":" << tok->column() << std::endl;
+        std::cout << " ";
+        for (; tok && !Token::Match(tok, "[;{}]"); tok = tok->next())
+            std::cout << " " << (tok->originalName().empty() ? tok->str() : tok->originalName());
+        std::cout << std::endl;
+    }
+
     std::vector<newInstantiation> newInstantiations;
 
     // add forward declarations
