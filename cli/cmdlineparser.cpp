@@ -797,8 +797,10 @@ CmdLineParser::Result CmdLineParser::parseFromArgs(int argc, const char* const a
         }
 
         // Force checking of files that have "too many" configurations
-        else if (std::strcmp(argv[i], "-f") == 0 || std::strcmp(argv[i], "--force") == 0)
+        else if (std::strcmp(argv[i], "-f") == 0 || std::strcmp(argv[i], "--force") == 0) {
             mSettings.force = true;
+            mSettings.maxConfigsOption = Settings::maxConfigsNotAssigned;
+        }
 
         else if (std::strcmp(argv[i], "--fsigned-char") == 0)
             defaultSign = 's';
@@ -971,6 +973,7 @@ CmdLineParser::Result CmdLineParser::parseFromArgs(int argc, const char* const a
             }
 
             mSettings.maxConfigsOption = tmp;
+            mSettings.force = false;
         }
 
         // max ctu depth

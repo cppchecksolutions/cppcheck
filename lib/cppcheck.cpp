@@ -1199,7 +1199,7 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
                     }
 
                     // Skip if we already met the same simplified token list
-                    if (!hashes.empty()) {
+                    if (maxConfigs > 1) {
                         const std::size_t hash = tokenizer.list.calculateHash();
                         if (hashes.find(hash) != hashes.end()) {
                             if (mSettings.debugwarnings)
