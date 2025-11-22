@@ -455,8 +455,6 @@ CmdLineParser::Result CmdLineParser::parseFromArgs(int argc, const char* const a
             if (!mSettings.userDefines.empty())
                 mSettings.userDefines += ";";
             mSettings.userDefines += define;
-
-            def = true;
         }
 
         // -E
