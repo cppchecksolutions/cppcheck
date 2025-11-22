@@ -407,7 +407,6 @@ CmdLineParser::Result CmdLineParser::parseFromArgs(int argc, const char* const a
         }
     }
 
-    bool def = false;
     bool debug = false;
     bool inputAsFilter = false; // set by: --file-filter=+
 
