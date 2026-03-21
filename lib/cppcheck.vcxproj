@@ -69,6 +69,7 @@
     <ClCompile Include="color.cpp" />
     <ClCompile Include="cppcheck.cpp" />
     <ClCompile Include="ctu.cpp" />
+    <ClCompile Include="dataflow.cpp" />
     <ClCompile Include="errorlogger.cpp" />
     <ClCompile Include="errortypes.cpp" />
     <ClCompile Include="findtoken.cpp" />
@@ -143,6 +144,7 @@
     <ClInclude Include="config.h" />
     <ClInclude Include="cppcheck.h" />
     <ClInclude Include="ctu.h" />
+    <ClInclude Include="dataflow.h" />
     <ClInclude Include="errorlogger.h" />
     <ClInclude Include="errortypes.h" />
     <ClInclude Include="filesettings.h" />

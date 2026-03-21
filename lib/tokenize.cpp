@@ -35,6 +35,7 @@
 #include "timer.h"
 #include "token.h"
 #include "utils.h"
+#include "dataflow.h"
 #include "valueflow.h"
 #include "vfvalue.h"
 
@@ -3534,7 +3535,12 @@ bool Tokenizer::simplifyTokens1(const std::string &configuration, int fileIndex)
 
     if (doValueFlow) {
         Timer::run("Tokenizer::simplifyTokens1::ValueFlow", showTime, mTimerResults, [&]() {
-            ValueFlow::setValues(list, *mSymbolDatabase, mErrorLogger, mSettings, mTimerResults);
+            // Requirement: CheckLevel::exhaustive uses the full ValueFlow analysis.
+            // CheckLevel::normal and ::reduced use the new fast DataFlow analysis.
+            if (mSettings.checkLevel == Settings::CheckLevel::exhaustive)
+                ValueFlow::setValues(list, *mSymbolDatabase, mErrorLogger, mSettings, mTimerResults);
+            else
+                DataFlow::setValues(list, *mSymbolDatabase, mErrorLogger, mSettings, mTimerResults);
         });
 
         arraySizeAfterValueFlow();
