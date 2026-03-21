@@ -22,23 +22,38 @@
  * See dataflow.h for the full design rationale and requirements.
  *
  * File layout:
- *   1. Core types (DFValues, DFState)
+ *   1. Core types
+ *        DFValues        — vector of values for one variable
+ *        DFState         — varId → DFValues (int, ptr, float, UNINIT)
+ *        DFMemberKey     — (objectVarId, fieldVarId) composite key (Phase M)
+ *        DFMemberKeyHash — hash for DFMemberKey
+ *        DFMemberState   — DFMemberKey → DFValues (Phase M)
+ *        DFContState     — varId → CONTAINER_SIZE DFValues (Phase C)
+ *        DFContext       — bundles DFState + DFMemberState + DFContState +
+ *                          DFUninitSet; forked at branches and merged at joins
  *   2. Complexity limits (MAX_BRANCH_DEPTH, MAX_LOOP_DEPTH, MAX_VARS)
- *   3. Helper predicates  (isTrackedVar, isTrackedPtrVar,
- *                          isLhsOfAssignment, isFunctionCallOpen)
- *   4. evalConstInt       (constant-fold an expression to an integer;
- *                          handles nullptr/NULL → 0 for pointer tracking)
- *   5. annotateTok        (write state values onto a token;
- *                          handles both integer and pointer variables)
- *   6. mergeStates        (combine two branch states after if/else)
- *   7. blockTerminates    (detect unconditional exit from a block)
- *   8. applyConditionConstraint (derive state update from a condition;
- *                          extended for !p, if(p), p==nullptr patterns)
- *   9. dropWrittenVars    (remove loop-modified vars from state)
- *  10. forwardAnalyzeBlock (Pass 1 — forward walk;
- *                          includes uninit detection and pointer assignments)
- *  11. backwardAnalyzeBlock (Pass 2 — backward walk)
- *  12. DataFlow::setValues  (public entry point)
+ *   3. Helper predicates
+ *        isTrackedVar          — integral non-pointer scalar
+ *        isTrackedPtrVar       — raw pointer (Phase N)
+ *        isTrackedFloatVar     — float/double/long double scalar (Phase F)
+ *        isTrackedContainerVar — std::vector / std::string / … (Phase C)
+ *        isLhsOfAssignment     — token is written, not read
+ *        isFunctionCallOpen    — '(' opening a function call
+ *   4. evalConstInt       — constant-fold expression to integer
+ *                           (handles nullptr/NULL → 0 for pointer tracking)
+ *   4b. evalConstFloat    — constant-fold expression to float (Phase F)
+ *   5. annotateTok        — write DFState values onto a token
+ *      annotateMemberTok  — write DFMemberState values onto field token (Phase M)
+ *      annotateContainerTok — write DFContState values onto container token (Phase C)
+ *   6. mergeStates        — combine two DFState/DFContState after if/else
+ *      mergeMemberStates  — combine two DFMemberState after if/else
+ *      mergeContexts      — combine two DFContext after if/else
+ *   7. blockTerminates    — detect unconditional exit from a block
+ *   8. applyConditionConstraint — derive state update from a condition
+ *   9. dropWrittenVars    — remove loop-modified vars from DFContext
+ *  10. forwardAnalyzeBlock  — Pass 1 (forward walk, all phases)
+ *  11. backwardAnalyzeBlock — Pass 2 (backward walk, int/ptr constraints)
+ *  12. DataFlow::setValues  — public entry point
  *
  * NULL POINTER TRACKING (Phase N):
  *   Pointer variables are tracked when assigned nullptr/NULL/0.
@@ -49,11 +64,47 @@
  *   and "if(p)" update the state in both the forward and backward passes.
  *
  * UNINIT VARIABLE TRACKING (Phase U):
- *   Local integer and pointer variables declared without an initializer
- *   (e.g. "int x;", "int *p;") are given a UNINIT value in the forward
- *   state.  Subsequent assignments clear the UNINIT.  Variable reads that
- *   occur while the UNINIT is still in state are annotated so that
- *   CheckUninitVar can detect the uninitialized use.
+ *   Local integer, pointer, and float variables declared without an
+ *   initializer (e.g. "int x;", "int *p;", "double d;") are given a UNINIT
+ *   value in the forward state.  Subsequent assignments clear the UNINIT.
+ *   Variable reads that occur while the UNINIT is still in state are
+ *   annotated so that CheckUninitVar can detect the uninitialized use.
+ *
+ * ENHANCED UNINIT TRACKING (Phase U2):
+ *   The DFUninitSet (inside DFContext) remembers which variables were
+ *   declared without an initializer.  After a function call clears the
+ *   main state, UNINIT(Possible) is re-injected for every varId still in
+ *   the uninit set.  This prevents the call from silently "forgetting"
+ *   uninitialized variables.  The set is updated (erased) when the variable
+ *   receives its first definite assignment.  At branch merges, the uninit
+ *   sets are unioned so that a variable stays in the set if it might be
+ *   uninitialized on any surviving path.
+ *
+ * FLOAT TRACKING (Phase F):
+ *   Float, double, and long double scalar variables are tracked in the same
+ *   DFState as integer variables, but using ValueFlow::Value entries with
+ *   valueType==FLOAT and floatValue set.  evalConstFloat() constant-folds
+ *   float expressions; annotateTok() writes FLOAT values onto tokens.
+ *
+ * STRUCT/CLASS MEMBER TRACKING (Phase M):
+ *   Member accesses "obj.field = value" and "obj.field" reads are tracked
+ *   in a separate DFMemberState keyed by (objectVarId, fieldVarId).
+ *   The member state is forked at branches and merged at join points using
+ *   the same rules as the main DFState.  Function calls clear the member
+ *   state conservatively.
+ *
+ * STRING LITERAL NON-NULL (Phase S):
+ *   Assigning a string literal to a pointer ("const char *p = "hello";")
+ *   stores an Impossible(0) value on the pointer variable, indicating that
+ *   the pointer is definitely NOT null.  This suppresses spurious null-
+ *   pointer warnings from CheckNullPointer.
+ *
+ * CONTAINER SIZE TRACKING (Phase C):
+ *   Container variables (std::vector, std::string, …) are tracked in a
+ *   separate DFContState using CONTAINER_SIZE values.  push_back/
+ *   emplace_back increment the known size; pop_back decrements it; clear
+ *   resets it to 0.  The container variable token is annotated with the
+ *   current size whenever it is read.
  */
 
 #include "dataflow.h"
@@ -65,7 +116,9 @@
 #include "vfvalue.h"
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Suppress unused-parameter warnings for parameters kept for API symmetry.
@@ -86,9 +139,53 @@ using DFValues = std::vector<ValueFlow::Value>;
 /// The analysis state for one point in the program.
 /// Maps each tracked variable ID to its current set of values.
 ///
-/// Requirement 5: only integer (non-pointer) variables are stored here.
-/// Other variable types are ignored throughout the analysis.
+/// Used for integer, pointer, float, and UNINIT values — all in one map
+/// distinguished by ValueFlow::Value::valueType.
 using DFState = std::unordered_map<nonneg int, DFValues>;
+
+/// Phase M: composite key identifying one struct/class member field.
+/// First element is the variable ID of the object; second is the variable ID
+/// of the field within that object's type.
+using DFMemberKey = std::pair<nonneg int, nonneg int>;
+
+/// Hash for DFMemberKey.  Uses a multiplicative combine to reduce collisions
+/// from closely-spaced integer pairs.
+struct DFMemberKeyHash {
+    std::size_t operator()(const DFMemberKey& k) const noexcept {
+        // Knuth multiplicative hash combine
+        return std::hash<nonneg int>()(k.first) * 2654435761UL ^
+               std::hash<nonneg int>()(k.second);
+    }
+};
+
+/// Phase M: per-member-field state.  Maps (objectVarId, fieldVarId) to the
+/// current set of values that field is known/possibly equal to.
+using DFMemberState = std::unordered_map<DFMemberKey, DFValues, DFMemberKeyHash>;
+
+/// Phase C: per-container state.  Maps container varId to CONTAINER_SIZE
+/// values representing the current known/possible size.
+/// Re-uses the same DFValues type; all stored values have
+/// valueType == ValueFlow::Value::ValueType::CONTAINER_SIZE.
+using DFContState = std::unordered_map<nonneg int, DFValues>;
+
+/// Phase U2: set of variable IDs that were declared without an initializer
+/// in the current function body.  Survives function calls (unlike DFState)
+/// so UNINIT can be re-injected after calls.  Removed when the variable
+/// receives its first definite assignment.
+using DFUninitSet = std::unordered_set<nonneg int>;
+
+/// Bundle of per-branch analysis state for the forward pass.
+///
+/// All four fields are copied when the analysis forks at an if/else branch,
+/// and merged back at the join point.  For DFUninitSet, the merge takes the
+/// union: a variable stays in the set if it might be uninitialized on any
+/// surviving path.
+struct DFContext {
+    DFState       state;       ///< varId → values (int, ptr, float, UNINIT)
+    DFMemberState members;     ///< (objVarId, fieldVarId) → values  (Phase M)
+    DFContState   containers;  ///< container varId → CONTAINER_SIZE  (Phase C)
+    DFUninitSet   uninits;     ///< declared-without-init varIds       (Phase U2)
+};
 
 
 // ===========================================================================
@@ -148,6 +245,39 @@ static bool isTrackedPtrVar(const Token* tok) {
     return vt && vt->pointer > 0;
 }
 
+/// Returns true when tok refers to a floating-point scalar variable.
+///
+/// Phase F: track float/double/long double non-pointer variables so that
+/// the analysis can propagate constant float values through assignments and
+/// arithmetic, enabling checkers to detect float-related bugs.
+static bool isTrackedFloatVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+    const Variable* var = tok->variable();
+    if (!var)
+        return false;
+    const ValueType* vt = var->valueType();
+    // isFloat() returns true for FLOAT, DOUBLE, and LONGDOUBLE.
+    return vt && vt->isFloat() && vt->pointer == 0;
+}
+
+/// Returns true when tok refers to a container variable (std::vector,
+/// std::string, etc.) that the analysis should track for size information.
+///
+/// Phase C: requires library configuration to be loaded so that ValueType
+/// is populated with CONTAINER type information.
+static bool isTrackedContainerVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+    const Variable* var = tok->variable();
+    if (!var)
+        return false;
+    const ValueType* vt = var->valueType();
+    return vt &&
+           vt->type == ValueType::Type::CONTAINER &&
+           vt->container != nullptr;
+}
+
 /// Returns true when tok is the direct left-hand-side operand of an
 /// assignment operator (=, +=, -=, …).
 /// Such tokens are being written to, not read, so they must not be annotated
@@ -171,8 +301,6 @@ static bool isFunctionCallOpen(const Token* tok) {
     // Exclude control-flow keywords
     if (Token::Match(prev, "if|for|while|do|switch|return|catch|throw"))
         return false;
-    // Exclude variable names (e.g. a function pointer call through a variable
-    // is intentionally treated as a call — we still clear state)
     // Exclude type-cast expressions: "(int)x" — prev is a type keyword
     if (prev->isStandardType())
         return false;
@@ -191,6 +319,7 @@ static bool isFunctionCallOpen(const Token* tok) {
 /// Handles:
 ///  - Integer literals            (42, 0xFF, …)
 ///  - Character literals          ('a', …)
+///  - nullptr keyword             → 0 (Phase N)
 ///  - Variables with a Known value in state (copy propagation)
 ///  - Unary minus                 (-x)
 ///  - Binary arithmetic           (+, -, *, /, %)
@@ -231,7 +360,7 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
     }
 
     // --- Variable: look up in state ---
-    // Only propagate when there is a single Known value (unambiguous).
+    // Only propagate when there is a single Known integer value (unambiguous).
     if (expr->varId() > 0) {
         const auto it = state.find(expr->varId());
         if (it != state.end() &&
@@ -290,34 +419,134 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
 
 
 // ===========================================================================
-// 5. annotateTok
+// 4b. evalConstFloat  (Phase F)
+// ===========================================================================
+
+/// Try to evaluate the expression rooted at `expr` as a compile-time
+/// floating-point constant.  Returns true and sets `result` (with
+/// valueType==FLOAT and floatValue set) on success, false otherwise.
+///
+/// Phase F1: constant-fold float/double expressions.  Reuses the same
+/// recursive structure as evalConstInt().
+///
+/// Handles:
+///  - Float literals          (3.14, 1.0e-5, …)
+///  - Integer literals        (promoted to double for mixed arithmetic)
+///  - Variables with a single Known FLOAT value in state
+///  - Unary minus             (-x)
+///  - Binary arithmetic       (+, -, *, /)
+///  - Division by zero        (returns false — no value, no FP)
+static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::Value& result) {
+    if (!expr)
+        return false;
+
+    // --- Float literal ---
+    if (expr->isNumber() && MathLib::isFloat(expr->str())) {
+        result = ValueFlow::Value();
+        result.valueType  = ValueFlow::Value::ValueType::FLOAT;
+        result.floatValue = MathLib::toDoubleNumber(expr->str());
+        result.setKnown();
+        return true;
+    }
+
+    // --- Integer literal (promoted to float context) ---
+    if (expr->isNumber() && MathLib::isInt(expr->str())) {
+        result = ValueFlow::Value();
+        result.valueType  = ValueFlow::Value::ValueType::FLOAT;
+        result.floatValue = static_cast<double>(MathLib::toBigNumber(expr->str()));
+        result.setKnown();
+        return true;
+    }
+
+    // --- Variable: look up Known FLOAT value in state ---
+    if (expr->varId() > 0) {
+        const auto it = state.find(expr->varId());
+        if (it != state.end() &&
+            it->second.size() == 1 &&
+            it->second[0].isKnown() &&
+            it->second[0].isFloatValue()) {
+            result = it->second[0];
+            return true;
+        }
+    }
+
+    // --- Unary minus ---
+    if (expr->str() == "-" && expr->astOperand1() && !expr->astOperand2()) {
+        ValueFlow::Value inner;
+        if (!evalConstFloat(expr->astOperand1(), state, inner))
+            return false;
+        inner.floatValue = -inner.floatValue;
+        result = inner;
+        return true;
+    }
+
+    // --- Binary arithmetic ---
+    if (expr->astOperand1() && expr->astOperand2()) {
+        ValueFlow::Value lhs, rhs;
+        if (!evalConstFloat(expr->astOperand1(), state, lhs) ||
+            !evalConstFloat(expr->astOperand2(), state, rhs))
+            return false;
+        if (!lhs.isFloatValue() || !rhs.isFloatValue())
+            return false;
+
+        result = ValueFlow::Value();
+        result.valueType = ValueFlow::Value::ValueType::FLOAT;
+        result.setKnown();
+        const std::string& op = expr->str();
+        if (op == "+")
+            result.floatValue = lhs.floatValue + rhs.floatValue;
+        else if (op == "-")
+            result.floatValue = lhs.floatValue - rhs.floatValue;
+        else if (op == "*")
+            result.floatValue = lhs.floatValue * rhs.floatValue;
+        else if (op == "/" && rhs.floatValue != 0.0)
+            result.floatValue = lhs.floatValue / rhs.floatValue;
+        else
+            return false;  // division by zero or unsupported operator
+        return true;
+    }
+
+    return false;
+}
+
+
+// ===========================================================================
+// 5. annotateTok / annotateMemberTok / annotateContainerTok
 // ===========================================================================
 
 /// Write the values from `state` onto tok->values().
 ///
-/// Called for every variable-read token in both the forward and backward
-/// passes.  This is the mechanism by which analysis results become visible to
-/// the existing checkers (requirement 2).
+/// Called for every variable-read token in the forward pass (for int, ptr,
+/// float, and UNINIT values) and in the backward pass (for int and ptr
+/// constraint values).  This is the mechanism by which analysis results
+/// become visible to the existing checkers (requirement 2).
 ///
 /// Preconditions that must all hold for annotation to occur:
 ///  - tok has a non-zero varId (it refers to a variable)
-///  - the variable is an integer/pointer (isTrackedVar or isTrackedPtrVar)
+///  - the variable is integral, pointer, or float
+///    (isTrackedVar, isTrackedPtrVar, or isTrackedFloatVar)
 ///  - tok is not the LHS of an assignment (it is being read, not written)
 ///  - tok is not the variable's declaration name token (it is a use, not a def)
 ///  - the variable is present in state
 ///
-/// Phase N: pointer variables are annotated so CheckNullPointer sees null values.
+/// Phase N: pointer variables are annotated so CheckNullPointer sees null.
 /// Phase U: UNINIT values are annotated so CheckUninitVar sees uninit uses.
+/// Phase F: FLOAT values are annotated from state on float variables.
+///
+/// NOTE: The backward pass may call this with a DFState that contains only
+/// int/ptr constraint values from conditions.  Float variables will never
+/// have backward constraint entries, so the isTrackedFloatVar guard is
+/// effectively dead in the backward pass (but harmless).
 static void annotateTok(Token* tok, const DFState& state) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
-    if (!isTrackedVar(tok) && !isTrackedPtrVar(tok))
+    if (!isTrackedVar(tok) && !isTrackedPtrVar(tok) && !isTrackedFloatVar(tok))
         return;
     if (isLhsOfAssignment(tok))
         return;  // write site — do not annotate
     // Do not annotate the declaration token itself — it is a definition,
-    // not a use.  (The forward pass adds UNINIT to state at the declaration
-    // and then skips this token via `continue`; this guard is a safety net.)
+    // not a use.  (The forward pass handles it separately via the declaration
+    // detection block; this guard is a safety net.)
     if (tok->variable() && tok->variable()->nameToken() == tok)
         return;
 
@@ -329,9 +558,63 @@ static void annotateTok(Token* tok, const DFState& state) {
         tok->addValue(val);
 }
 
+/// Phase M: annotate the field token of a member-access read "obj.field"
+/// with the known/possible values from the member state.
+///
+/// Checks that tok is the right-hand operand of a '.' token (i.e. it IS the
+/// field being accessed), then looks up (obj.varId(), field.varId()) in
+/// ctx.members and copies the values onto tok.
+static void annotateMemberTok(Token* tok, const DFContext& ctx) {
+    if (!tok || tok->varId() == 0 || !tok->isName())
+        return;
+    if (isLhsOfAssignment(tok))
+        return;  // member is being written — do not annotate
+
+    // tok must be the field operand (rhs) of a '.' member-access expression
+    const Token* parent = tok->astParent();
+    if (!parent || parent->str() != ".")
+        return;
+    if (parent->astOperand2() != tok)
+        return;
+
+    const Token* objTok = parent->astOperand1();
+    if (!objTok || objTok->varId() == 0)
+        return;
+
+    const auto it = ctx.members.find({objTok->varId(), tok->varId()});
+    if (it == ctx.members.end())
+        return;
+
+    for (const ValueFlow::Value& val : it->second)
+        tok->addValue(val);
+}
+
+/// Phase C: annotate a container variable token with the current known
+/// CONTAINER_SIZE value from the container state.
+///
+/// Called for every variable-read token; the isTrackedContainerVar guard
+/// filters non-container tokens efficiently.
+static void annotateContainerTok(Token* tok, const DFContext& ctx) {
+    if (!tok || tok->varId() == 0 || !tok->isName())
+        return;
+    if (!isTrackedContainerVar(tok))
+        return;
+    if (isLhsOfAssignment(tok))
+        return;
+    if (tok->variable() && tok->variable()->nameToken() == tok)
+        return;
+
+    const auto it = ctx.containers.find(tok->varId());
+    if (it == ctx.containers.end())
+        return;
+
+    for (const ValueFlow::Value& val : it->second)
+        tok->addValue(val);
+}
+
 
 // ===========================================================================
-// 6. mergeStates
+// 6. mergeStates / mergeMemberStates / mergeContexts
 // ===========================================================================
 
 /// Merge two branch states at a join point (after if/else).
@@ -351,6 +634,8 @@ static void annotateTok(Token* tok, const DFState& state) {
 ///    Example: x=5 set before the if; only then-branch modifies x →
 ///    after merge x has {5 Possible, new_value Possible}.
 ///    (The original value comes in as stateElse from the caller.)
+///
+/// Used for both DFState and DFContState (they share the same underlying type).
 static DFState mergeStates(const DFState& s1, const DFState& s2) {
     DFState result;
 
@@ -394,6 +679,69 @@ static DFState mergeStates(const DFState& s1, const DFState& s2) {
     return result;
 }
 
+/// Phase M: merge two DFMemberState instances.
+/// Uses the same rules as mergeStates() but keyed on DFMemberKey.
+static DFMemberState mergeMemberStates(const DFMemberState& s1,
+                                       const DFMemberState& s2) {
+    DFMemberState result;
+
+    for (const auto& [key, vals1] : s1) {
+        const auto it2 = s2.find(key);
+        if (it2 == s2.end())
+            continue;
+
+        const DFValues& vals2 = it2->second;
+
+        if (vals1.size() == 1 && vals2.size() == 1 &&
+            vals1[0].isKnown() && vals2[0].isKnown() &&
+            vals1[0].equalValue(vals2[0])) {
+            result[key] = vals1;
+            continue;
+        }
+
+        DFValues merged;
+        for (const ValueFlow::Value& v : vals1) {
+            ValueFlow::Value pv = v;
+            pv.setPossible();
+            merged.push_back(pv);
+        }
+        for (const ValueFlow::Value& v : vals2) {
+            const bool dup = std::any_of(merged.begin(), merged.end(),
+                                         [&v](const ValueFlow::Value& m) {
+                return m.equalValue(v);
+            });
+            if (!dup) {
+                ValueFlow::Value pv = v;
+                pv.setPossible();
+                merged.push_back(pv);
+            }
+        }
+        if (!merged.empty())
+            result[key] = std::move(merged);
+    }
+    return result;
+}
+
+/// Merge two full DFContext instances at a branch join point.
+///
+/// Each field is merged by its own rule:
+///  state      — mergeStates()        (int, ptr, float, UNINIT values)
+///  members    — mergeMemberStates()  (Phase M)
+///  containers — mergeStates()        (Phase C; same rules as main state)
+///  uninits    — union               (Phase U2; variable stays if possibly
+///                                    uninit on any path)
+static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
+    DFContext result;
+    result.state      = mergeStates(c1.state, c2.state);
+    result.members    = mergeMemberStates(c1.members, c2.members);
+    result.containers = mergeStates(c1.containers, c2.containers);
+    // Phase U2: union — variable stays in uninits if uninit on any path
+    result.uninits = c1.uninits;
+    for (const nonneg int varId : c2.uninits)
+        result.uninits.insert(varId);
+    return result;
+}
+
 
 // ===========================================================================
 // 7. blockTerminates
@@ -433,6 +781,8 @@ static bool blockTerminates(const Token* start, const Token* end) {
 ///
 /// Only handles the two trivially safe patterns:
 ///   x == constant   and   x != constant   (and their mirror-image forms)
+/// plus pointer-specific patterns:
+///   !p, if(p), p==nullptr, p!=nullptr
 ///
 /// All other condition forms are ignored (requirement 4 — no FP: when in
 /// doubt, do nothing).
@@ -543,21 +893,52 @@ static void applyConditionConstraint(const Token* condRoot,
 // 9. dropWrittenVars
 // ===========================================================================
 
-/// Erase from `state` every variable that is assigned anywhere inside the
-/// token range [start, end).
+/// Erase from `ctx` every variable (and member field / container) that is
+/// assigned anywhere inside the token range [start, end).
 ///
 /// Used conservatively for loop bodies: because we cannot know how many times
 /// a loop executes, any variable modified inside it has an unknown value after
 /// the loop (requirement 4).
-static void dropWrittenVars(const Token* start, const Token* end, DFState& state) {
+///
+/// Phase M: member assignments (obj.field = …) erase the corresponding entry
+/// from ctx.members.
+/// Phase C: container method calls (v.push_back(…) etc.) erase the container
+/// from ctx.containers since the size is no longer known after an
+/// unknown number of iterations.
+static void dropWrittenVars(const Token* start, const Token* end, DFContext& ctx) {
     for (const Token* t = start; t && t != end; t = t->next()) {
         // Direct assignment (x = …, x += …, etc.)
-        if (t->varId() > 0 && isLhsOfAssignment(t))
-            state.erase(t->varId());
+        if (t->isAssignmentOp()) {
+            const Token* lhs = t->astOperand1();
+            if (lhs) {
+                // Simple variable assignment
+                if (lhs->varId() > 0) {
+                    ctx.state.erase(lhs->varId());
+                    ctx.containers.erase(lhs->varId());
+                }
+                // Phase M: member assignment obj.field = …
+                if (lhs->str() == "." &&
+                    lhs->astOperand1() && lhs->astOperand2() &&
+                    lhs->astOperand1()->varId() > 0 &&
+                    lhs->astOperand2()->varId() > 0)
+                    ctx.members.erase({lhs->astOperand1()->varId(),
+                                       lhs->astOperand2()->varId()});
+            }
+        }
         // Implicit assignment via increment/decrement
         if ((t->str() == "++" || t->str() == "--") &&
             t->astOperand1() && t->astOperand1()->varId() > 0)
-            state.erase(t->astOperand1()->varId());
+            ctx.state.erase(t->astOperand1()->varId());
+        // Phase C: container method call in loop body — drop the container size.
+        // Any mutation method makes the size unpredictable over loop iterations.
+        if (isFunctionCallOpen(t)) {
+            const Token* funcExpr = t->astOperand1();
+            if (funcExpr && funcExpr->str() == "." && funcExpr->astOperand1()) {
+                const Token* objTok = funcExpr->astOperand1();
+                if (objTok && objTok->varId() > 0)
+                    ctx.containers.erase(objTok->varId());
+            }
+        }
     }
 }
 
@@ -568,12 +949,12 @@ static void dropWrittenVars(const Token* start, const Token* end, DFState& state
 
 // Forward declaration — needed because if-branches recurse.
 static void forwardAnalyzeBlock(Token* start, const Token* end,
-                                DFState& state,
+                                DFContext& ctx,
                                 int branchDepth, int loopDepth);
 
 /// Forward analysis pass: walk [start, end) in program order.
 ///
-/// State semantics: state[varId] = the values that varId is KNOWN or
+/// State semantics: ctx.state[varId] = the values that varId is KNOWN or
 /// POSSIBLY equal to at the current program point.
 ///
 /// Requirement 3 (flow-sensitive): assignments update the state; branches
@@ -585,43 +966,74 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 ///
 /// Requirement 6 (fast): no iteration; each token is visited at most once
 /// across all recursive calls within a single function body.
+///
+/// Implements all phases:
+///   N  — null pointer tracking
+///   U  — uninit variable tracking
+///   U2 — uninit survives function calls (DFUninitSet in ctx)
+///   F  — float/double value tracking
+///   S  — string literal → Impossible-null pointer
+///   M  — struct/class member field tracking
+///   C  — container size tracking
 static void forwardAnalyzeBlock(Token* start, const Token* end,
-                                DFState& state,
+                                DFContext& ctx,
                                 int branchDepth, int loopDepth) {
     for (Token* tok = start; tok && tok != end; tok = tok->next()) {
 
         // --- Abort if state has grown too large (requirement 4) ---
-        if (state.size() > MAX_VARS)
+        if (ctx.state.size() > MAX_VARS)
             return;
 
         // =================================================================
-        // Phase U: Uninitialized variable declaration detection
+        // Variable declaration detection
+        //
+        // Phases U / U2 / F / C:
         //
         // When we encounter the name token that IS the variable's declaration
-        // (tok == var->nameToken()) and the declaration has no initializer
-        // (tok is not the LHS of '='), add a UNINIT value to state.
+        // (tok == var->nameToken()), handle each tracked type:
         //
-        // This satisfies Phase U0–U2: local integral and pointer variables
-        // without an initializer are marked so that subsequent reads can be
-        // flagged by CheckUninitVar.  The assignment handler below will clear
-        // the UNINIT when the variable is later initialized.
+        //   Container (Phase C): initialize size to 0 (default-constructed)
+        //   Int/Ptr/Float without initializer (Phases U, U2, F): add UNINIT
+        //     to state and to ctx.uninits (the U2 persistent set)
+        //   Int/Ptr/Float with initializer: do nothing here — the assignment
+        //     operator will be handled below when we walk past the '='
         //
-        // We skip: function parameters (isArgument), statics (isStatic),
-        //          and arrays (not scalar — too complex to track).
+        // We skip: function parameters (isArgument), statics, arrays.
         // =================================================================
         if (tok->varId() > 0 && tok->variable() &&
             tok->variable()->nameToken() == tok) {
             const Variable* declVar = tok->variable();
             if (declVar->isLocal() && !declVar->isStatic() &&
-                !declVar->isArgument() && !declVar->isArray() &&
-                (isTrackedVar(tok) || isTrackedPtrVar(tok)) &&
-                !isLhsOfAssignment(tok)) {
-                // Local variable declared without an initializer.
-                ValueFlow::Value uninit;
-                uninit.valueType = ValueFlow::Value::ValueType::UNINIT;
-                uninit.setKnown();
-                state[tok->varId()] = {uninit};
-                continue;  // declaration token is a def, not a use — don't annotate
+                !declVar->isArgument() && !declVar->isArray()) {
+
+                // Phase C: default-constructed container → size 0
+                if (isTrackedContainerVar(tok)) {
+                    // Only initialise if there is no following '{' (list init)
+                    // or '(' (direct init) — we can't determine the initial
+                    // size in those cases.
+                    const Token* nxt = tok->next();
+                    if (!nxt || (nxt->str() != "{" && nxt->str() != "(")) {
+                        ValueFlow::Value zero;
+                        zero.valueType = ValueFlow::Value::ValueType::CONTAINER_SIZE;
+                        zero.intvalue  = 0;
+                        zero.setKnown();
+                        ctx.containers[tok->varId()] = {zero};
+                    }
+                    continue;  // declaration token is a def, not a use
+                }
+
+                // Phases U / U2 / F: uninit detection for int/ptr/float
+                if ((isTrackedVar(tok) || isTrackedPtrVar(tok) ||
+                     isTrackedFloatVar(tok)) &&
+                    !isLhsOfAssignment(tok)) {
+                    // Variable declared without an initializer.
+                    ValueFlow::Value uninit;
+                    uninit.valueType = ValueFlow::Value::ValueType::UNINIT;
+                    uninit.setKnown();
+                    ctx.state[tok->varId()] = {uninit};
+                    ctx.uninits.insert(tok->varId());  // Phase U2
+                    continue;  // declaration token is a def, not a use
+                }
             }
         }
 
@@ -639,9 +1051,12 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (!parenClose)
                 continue;
 
-            // The then-block must be brace-enclosed for correctness.
-            // Brace-less if-bodies are uncommon and complex to handle without
-            // risking incorrect state updates — abort (requirement 4).
+            // The tokenizer always inserts braces around single-statement
+            // if/while/for/do bodies (Tokenizer::simplifyIfAddBraces and
+            // related passes), so a brace-less body is not expected here.
+            // The guard is kept as a safety net in case a future tokenizer
+            // change removes that guarantee — if it fires, aborting is the
+            // safe choice (requirement 4: no FP).
             const Token* thenOpen = parenClose->next();
             if (!thenOpen || thenOpen->str() != "{")
                 return;
@@ -649,19 +1064,19 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (!thenClose)
                 return;
 
-            // Fork: both branches start from the current state.
-            DFState stateThen = state;
-            DFState stateElse = state;
+            // Fork: both branches start from the current context.
+            DFContext ctxThen = ctx;
+            DFContext ctxElse = ctx;
 
             // Apply the if-condition constraint inside the then-block.
             // condRoot is the AST root of the condition expression.
             const Token* condRoot = parenOpen->astOperand2();
-            applyConditionConstraint(condRoot, stateThen, /*branchTaken=*/true);
-            applyConditionConstraint(condRoot, stateElse, /*branchTaken=*/false);
+            applyConditionConstraint(condRoot, ctxThen.state, /*branchTaken=*/true);
+            applyConditionConstraint(condRoot, ctxElse.state, /*branchTaken=*/false);
 
             // Analyse the then-block.
             forwardAnalyzeBlock(const_cast<Token*>(thenOpen->next()), thenClose,
-                                stateThen, branchDepth + 1, loopDepth);
+                                ctxThen, branchDepth + 1, loopDepth);
             const bool thenTerminates = blockTerminates(thenOpen->next(), thenClose);
 
             // Check for else / else-if.
@@ -675,36 +1090,38 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     return;
 
                 forwardAnalyzeBlock(const_cast<Token*>(elseOpen->next()), elseClose,
-                                    stateElse, branchDepth + 1, loopDepth);
+                                    ctxElse, branchDepth + 1, loopDepth);
                 const bool elseTerminates = blockTerminates(elseOpen->next(), elseClose);
 
-                // Merge: keep only the state from paths that reach the join point.
+                // Merge: keep only the context from paths that reach the join point.
                 if (thenTerminates && !elseTerminates)
-                    state = std::move(stateElse);       // only else continues
+                    ctx = std::move(ctxElse);       // only else continues
                 else if (!thenTerminates && elseTerminates)
-                    state = std::move(stateThen);       // only then continues
+                    ctx = std::move(ctxThen);       // only then continues
                 else if (!thenTerminates && !elseTerminates)
-                    state = mergeStates(stateThen, stateElse);
-                // else both terminate → dead code follows; state doesn't matter
+                    ctx = mergeContexts(ctxThen, ctxElse);
+                // else both terminate → dead code follows; ctx doesn't matter
 
                 tok = const_cast<Token*>(elseClose);
 
             } else if (Token::simpleMatch(afterThen, "else if")) {
                 // --- else-if chain ---
-                // These create complex multi-way branches that are difficult
-                // to merge correctly.  Abort to avoid FP (requirement 4).
+                // The tokenizer simplifies "else if (...) { ... }" into
+                // "else { if (...) { ... } }" (Tokenizer::simplifyIfAddBraces),
+                // so this branch is not expected to be reached in practice.
+                // It is kept as a safety net; aborting is the safe choice
+                // (requirement 4: no FP).
                 return;
 
             } else {
                 // --- if with no else ---
                 // The two paths at the merge point are:
-                //   Path A (then taken):   stateThen  (possibly exits if thenTerminates)
-                //   Path B (then skipped): stateElse  (condition was false → original state
-                //                                       possibly with impossible value applied)
+                //   Path A (then taken):   ctxThen  (possibly exits if thenTerminates)
+                //   Path B (then skipped): ctxElse  (condition was false)
                 if (thenTerminates)
-                    state = std::move(stateElse);       // only B reaches here
+                    ctx = std::move(ctxElse);       // only B reaches here
                 else
-                    state = mergeStates(stateThen, stateElse);
+                    ctx = mergeContexts(ctxThen, ctxElse);
 
                 tok = const_cast<Token*>(thenClose);
             }
@@ -742,7 +1159,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Drop all variables that might be modified in the loop body.
             // We cannot determine the iteration count, so we must be
             // conservative (requirement 4).
-            dropWrittenVars(bodyOpen->next(), bodyClose, state);
+            dropWrittenVars(bodyOpen->next(), bodyClose, ctx);
 
             // Skip the loop body in the outer walk (already handled above).
             tok = const_cast<Token*>(bodyClose);
@@ -770,23 +1187,116 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // However, arguments ARE reads that occur before the call executes.
         // Annotate them with the current state BEFORE clearing, so that
         // UNINIT/null values on arguments are recorded.
+        //
+        // Phase U2: after clearing state, re-inject UNINIT(Possible) for
+        // every varId in ctx.uninits so that variables declared without
+        // an initializer remain visible as potentially uninitialized after
+        // the call.
+        //
+        // Phase C: container method calls are handled first (before the
+        // generic state-clear) so we can update the container size from
+        // known operations.  The main state is still cleared for safety;
+        // only the specifically-tracked container size is preserved.
         if (isFunctionCallOpen(tok)) {
-            // Annotate each argument token in the call's argument list.
-            // Walk between '(' and ')' — skip nested calls to avoid
-            // double-processing (their own '(' handler will clear state).
+            bool isKnownContainerMethod = false;
+
+            // Phase C: detect container method calls and update size.
+            // AST for "v.push_back(x)":
+            //   '(' → astOperand1 = '.' → astOperand1 = 'v'
+            //                           → astOperand2 = 'push_back'
+            {
+                const Token* funcExpr = tok->astOperand1();
+                if (funcExpr && funcExpr->str() == "." &&
+                    funcExpr->astOperand1() && funcExpr->astOperand2()) {
+                    const Token* objTok    = funcExpr->astOperand1();
+                    const Token* methodTok = funcExpr->astOperand2();
+                    if (objTok && objTok->varId() > 0 &&
+                        isTrackedContainerVar(objTok) && methodTok) {
+                        const nonneg int cId   = objTok->varId();
+                        const std::string& method = methodTok->str();
+
+                        if (method == "push_back"    || method == "emplace_back" ||
+                            method == "push_front"   || method == "emplace_front") {
+                            // Increment size by 1 if currently Known.
+                            auto it = ctx.containers.find(cId);
+                            if (it != ctx.containers.end() &&
+                                it->second.size() == 1 &&
+                                it->second[0].isKnown())
+                                it->second[0].intvalue++;
+                            else
+                                ctx.containers.erase(cId);
+                            isKnownContainerMethod = true;
+
+                        } else if (method == "pop_back" || method == "pop_front") {
+                            auto it = ctx.containers.find(cId);
+                            if (it != ctx.containers.end() &&
+                                it->second.size() == 1 &&
+                                it->second[0].isKnown() &&
+                                it->second[0].intvalue > 0)
+                                it->second[0].intvalue--;
+                            else
+                                ctx.containers.erase(cId);
+                            isKnownContainerMethod = true;
+
+                        } else if (method == "clear") {
+                            ValueFlow::Value zero;
+                            zero.valueType = ValueFlow::Value::ValueType::CONTAINER_SIZE;
+                            zero.intvalue  = 0;
+                            zero.setKnown();
+                            ctx.containers[cId] = {zero};
+                            isKnownContainerMethod = true;
+
+                        } else if (method == "size" || method == "empty" ||
+                                   method == "begin" || method == "end"   ||
+                                   method == "cbegin" || method == "cend" ||
+                                   method == "front"  || method == "back") {
+                            // Read-only methods — size is unchanged.
+                            isKnownContainerMethod = true;
+
+                        } else {
+                            // Unknown method — conservatively drop container size.
+                            ctx.containers.erase(cId);
+                        }
+                    }
+                }
+            }
+
+            // Annotate each argument token with the current state BEFORE
+            // clearing.  Walk between '(' and ')' — skip nested calls to
+            // avoid double-processing.
             for (Token* argTok = tok->next();
                  argTok && argTok != tok->link();
                  argTok = argTok->next()) {
                 if (argTok->str() == "(") {
-                    // Skip nested call's argument list
                     if (argTok->link())
                         argTok = const_cast<Token*>(argTok->link());
                     continue;
                 }
-                if (argTok->varId() > 0 && argTok->isName())
-                    annotateTok(argTok, state);
+                if (argTok->varId() > 0 && argTok->isName()) {
+                    annotateTok(argTok, ctx.state);
+                    annotateMemberTok(argTok, ctx);
+                    annotateContainerTok(argTok, ctx);
+                }
             }
-            state.clear();
+
+            // Clear the main state and member state.
+            ctx.state.clear();
+            ctx.members.clear();
+            // Only clear container state for non-container-method calls.
+            if (!isKnownContainerMethod)
+                ctx.containers.clear();
+
+            // Phase U2: re-inject UNINIT(Possible) for all variables that
+            // were declared without an initializer and not yet assigned.
+            // This ensures that "still uninit" variables remain visible
+            // after a function call.
+            for (const nonneg int varId : ctx.uninits) {
+                ValueFlow::Value u;
+                u.valueType = ValueFlow::Value::ValueType::UNINIT;
+                u.setPossible();
+                ctx.state[varId] = {u};
+            }
+
             if (tok->link())
                 tok = const_cast<Token*>(tok->link());
             continue;
@@ -795,66 +1305,158 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // =================================================================
         // Assignments
         // =================================================================
-        if (tok->isAssignmentOp() &&
-            tok->astOperand1() && tok->astOperand1()->varId() > 0) {
-            const nonneg int varId = tok->astOperand1()->varId();
-
-            const bool isIntVar = isTrackedVar(tok->astOperand1());
-            const bool isPtrVar = isTrackedPtrVar(tok->astOperand1());
-
-            if (!isIntVar && !isPtrVar) {
-                // Non-integer, non-pointer variable — not tracked, just drop
-                // from state in case we had a stale entry (requirement 5).
-                state.erase(varId);
-                continue;
-            }
+        if (tok->isAssignmentOp() && tok->astOperand1()) {
+            const Token* lhs = tok->astOperand1();
 
             // -----------------------------------------------------------------
-            // Phase N: pointer assignment
-            // Only track assignment of nullptr/NULL/0 (null pointer constant).
-            // Any other assignment (new, malloc, &x, …) clears the state
-            // conservatively to avoid false positives.
+            // Phase M: member assignment  obj.field = value
+            // Detect "lhs is a '.' node" and handle separately before the
+            // simple-variable assignment code below.
             // -----------------------------------------------------------------
-            if (isPtrVar) {
-                if (tok->str() == "=") {
-                    ValueFlow::Value val;
-                    const DFState emptyPtrState;
-                    if (tok->astOperand2() &&
-                        evalConstInt(tok->astOperand2(), emptyPtrState, val) &&
-                        val.intvalue == 0) {
-                        // p = nullptr / p = 0 / p = NULL  →  Known null
-                        val.setKnown();
-                        state[varId] = {val};
-                    } else {
-                        // Unknown pointer value — forget it
-                        state.erase(varId);
-                    }
+            if (lhs->str() == "." &&
+                lhs->astOperand1() && lhs->astOperand2() &&
+                lhs->astOperand1()->varId() > 0 &&
+                lhs->astOperand2()->varId() > 0 &&
+                tok->str() == "=") {
+                const nonneg int objId   = lhs->astOperand1()->varId();
+                const nonneg int fieldId = lhs->astOperand2()->varId();
+                ValueFlow::Value val;
+                if (tok->astOperand2() &&
+                    evalConstInt(tok->astOperand2(), ctx.state, val)) {
+                    val.setKnown();
+                    ctx.members[{objId, fieldId}] = {val};
                 } else {
-                    // Compound assignment on a pointer (e.g. p += n) — drop.
-                    state.erase(varId);
+                    ctx.members.erase({objId, fieldId});
                 }
                 continue;
             }
 
+            // Simple variable assignment
+            if (lhs->varId() == 0) {
+                continue;  // complex LHS (array subscript, deref, etc.) — skip
+            }
+
+            const nonneg int varId  = lhs->varId();
+            const bool isIntVar     = isTrackedVar(lhs);
+            const bool isPtrVar     = isTrackedPtrVar(lhs);
+            const bool isFloatVar   = isTrackedFloatVar(lhs);
+
+            if (!isIntVar && !isPtrVar && !isFloatVar) {
+                // Non-tracked variable type — erase stale entries and skip.
+                ctx.state.erase(varId);
+                continue;
+            }
+
+            // Phase U2: variable has received an assignment — remove from
+            // uninits so that subsequent function calls do not re-inject UNINIT.
+            ctx.uninits.erase(varId);
+
+            // -----------------------------------------------------------------
+            // Phase N: pointer assignment
+            // Only track assignment of nullptr/NULL/0 (null pointer constant).
+            // Phase S: string literal assignment → Impossible-null.
+            // Any other assignment (new, malloc, &x, …) clears the state.
+            // -----------------------------------------------------------------
+            if (isPtrVar) {
+                if (tok->str() == "=") {
+                    const Token* rhs = tok->astOperand2();
+                    // Phase S: string literal → pointer is definitely NOT null
+                    if (rhs && rhs->tokType() == Token::eString) {
+                        ValueFlow::Value notNull(0LL);
+                        notNull.setImpossible();
+                        ctx.state[varId] = {notNull};
+                    } else {
+                        ValueFlow::Value val;
+                        const DFState emptyPtrState;
+                        if (rhs && evalConstInt(rhs, emptyPtrState, val) &&
+                            val.intvalue == 0) {
+                            // p = nullptr / p = 0 / p = NULL  →  Known null
+                            val.setKnown();
+                            ctx.state[varId] = {val};
+                        } else {
+                            // Unknown pointer value — forget it
+                            ctx.state.erase(varId);
+                        }
+                    }
+                } else {
+                    // Compound assignment on a pointer (e.g. p += n) — drop.
+                    ctx.state.erase(varId);
+                }
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // Phase F: float assignment
+            // -----------------------------------------------------------------
+            if (isFloatVar) {
+                if (tok->str() == "=") {
+                    ValueFlow::Value val;
+                    if (tok->astOperand2() &&
+                        evalConstFloat(tok->astOperand2(), ctx.state, val)) {
+                        val.setKnown();
+                        ctx.state[varId] = {val};
+                    } else {
+                        ctx.state.erase(varId);
+                    }
+                } else {
+                    // Compound assignment (+=, -=, *=, /=) on float:
+                    // only update if the current value is a single Known constant.
+                    auto it = ctx.state.find(varId);
+                    if (it != ctx.state.end() &&
+                        it->second.size() == 1 &&
+                        it->second[0].isKnown() &&
+                        it->second[0].isFloatValue()) {
+                        ValueFlow::Value rhs;
+                        if (tok->astOperand2() &&
+                            evalConstFloat(tok->astOperand2(), ctx.state, rhs)) {
+                            ValueFlow::Value& lv = it->second[0];
+                            const std::string& op = tok->str();
+                            if (op == "+=")
+                                lv.floatValue += rhs.floatValue;
+                            else if (op == "-=")
+                                lv.floatValue -= rhs.floatValue;
+                            else if (op == "*=")
+                                lv.floatValue *= rhs.floatValue;
+                            else if (op == "/=" && rhs.floatValue != 0.0)
+                                lv.floatValue /= rhs.floatValue;
+                            else {
+                                ctx.state.erase(varId);
+                                continue;
+                            }
+                        } else {
+                            ctx.state.erase(varId);
+                        }
+                    } else {
+                        ctx.state.erase(varId);
+                    }
+                }
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // Integer assignment (Phase 1 / original implementation)
+            // -----------------------------------------------------------------
             if (tok->str() == "=") {
                 // Simple assignment: evaluate RHS as a constant if possible.
                 ValueFlow::Value val;
-                if (tok->astOperand2() && evalConstInt(tok->astOperand2(), state, val)) {
+                if (tok->astOperand2() &&
+                    evalConstInt(tok->astOperand2(), ctx.state, val)) {
                     val.setKnown();
-                    state[varId] = {val};
+                    ctx.state[varId] = {val};
                 } else {
-                    state.erase(varId);  // unknown RHS → forget the variable
+                    ctx.state.erase(varId);  // unknown RHS → forget the variable
                 }
             } else {
                 // Compound assignment (+=, -=, *=, /=):
                 // only update the state when the current value is a single
                 // Known constant (otherwise we cannot compute the new value).
-                auto it = state.find(varId);
-                if (it != state.end() &&
+                auto it = ctx.state.find(varId);
+                if (it != ctx.state.end() &&
                     it->second.size() == 1 &&
                     it->second[0].isKnown()) {
                     ValueFlow::Value rhs;
-                    if (tok->astOperand2() && evalConstInt(tok->astOperand2(), state, rhs)) {
+                    if (tok->astOperand2() &&
+                        evalConstInt(tok->astOperand2(), ctx.state, rhs)) {
                         ValueFlow::Value& lv = it->second[0];
                         const std::string& op = tok->str();
                         if (op == "+=")
@@ -866,16 +1468,16 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         else if (op == "/=" && rhs.intvalue != 0)
                             lv.intvalue /= rhs.intvalue;
                         else {
-                            state.erase(varId);
+                            ctx.state.erase(varId);
                             continue;
                         }
                         lv.varvalue    = lv.intvalue;
                         lv.wideintvalue = lv.intvalue;
                     } else {
-                        state.erase(varId);
+                        ctx.state.erase(varId);
                     }
                 } else {
-                    state.erase(varId);
+                    ctx.state.erase(varId);
                 }
             }
             continue;
@@ -887,8 +1489,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         if ((tok->str() == "++" || tok->str() == "--") &&
             tok->astOperand1() && tok->astOperand1()->varId() > 0) {
             const nonneg int varId = tok->astOperand1()->varId();
-            auto it = state.find(varId);
-            if (it != state.end() &&
+            // Phase U2: increment/decrement is a definite write
+            ctx.uninits.erase(varId);
+            auto it = ctx.state.find(varId);
+            if (it != ctx.state.end() &&
                 it->second.size() == 1 &&
                 it->second[0].isKnown()) {
                 if (tok->str() == "++")
@@ -898,7 +1502,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 it->second[0].varvalue    = it->second[0].intvalue;
                 it->second[0].wideintvalue = it->second[0].intvalue;
             } else {
-                state.erase(varId);
+                ctx.state.erase(varId);
             }
             continue;
         }
@@ -906,8 +1510,11 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // =================================================================
         // Variable read: annotate with current state values
         // =================================================================
-        if (tok->varId() > 0 && tok->isName())
-            annotateTok(tok, state);
+        if (tok->varId() > 0 && tok->isName()) {
+            annotateTok(tok, ctx.state);       // int, ptr, float, UNINIT
+            annotateMemberTok(tok, ctx);       // Phase M: member field values
+            annotateContainerTok(tok, ctx);    // Phase C: container size values
+        }
     }
 }
 
@@ -935,6 +1542,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 /// Requirement 3 (flow-sensitive): assignments kill backward constraints.
 /// Requirement 4 (conservative): block boundaries are treated conservatively.
 /// Requirement 6 (fast): single backward pass, no iteration.
+///
+/// NOTE: The backward pass uses only DFState (int/ptr constraints from
+/// conditions).  Float, member, container, and U2 tracking are forward-only;
+/// the backward pass does not produce those value types.
 static void backwardAnalyzeBlock(const Token* start, const Token* end,
                                  DFState& state, int branchDepth) {
     if (!start || !end || start == end)
@@ -1120,15 +1731,17 @@ namespace DataFlow {
 ///
 ///   Pass 1 — Forward:
 ///     Propagates constant values from assignments toward uses.
-///     Handles if/else branches by forking and merging state.
+///     Handles if/else branches by forking and merging context.
 ///     Loops are handled conservatively (modified variables dropped).
-///     Function calls clear the entire state.
+///     Function calls clear the main state; Phase U2 re-injects UNINIT.
+///     Phases N, U, U2, F, S, M, C are all implemented here.
 ///
 ///   Pass 2 — Backward:
 ///     Propagates value constraints from condition checks (if (x == val))
 ///     backward to earlier uses of the same variable.
 ///     An assignment to x kills the backward constraint for x.
 ///     Block boundaries are treated conservatively.
+///     Only integer and pointer constraints are propagated (Phase N/B1).
 ///
 /// Both passes produce ValueFlow::Value annotations on tokens (requirement 2),
 /// so all existing checkers consume the output without modification.
@@ -1161,8 +1774,8 @@ void setValues(TokenList& tokenlist,
         // Walk from the first token after '{' to the closing '}'.
         // -----------------------------------------------------------------
         {
-            DFState fwdState;
-            forwardAnalyzeBlock(bodyFirst, bodyEnd, fwdState,
+            DFContext fwdCtx;  // all fields default-initialised (empty)
+            forwardAnalyzeBlock(bodyFirst, bodyEnd, fwdCtx,
                                 /*branchDepth=*/0, /*loopDepth=*/0);
         }
 

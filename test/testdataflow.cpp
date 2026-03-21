@@ -42,6 +42,7 @@
 #include "vfvalue.h"
 
 #include <algorithm>
+#include <cmath>
 #include <list>
 #include <string>
 
@@ -81,6 +82,21 @@ private:
 
         // Phase U — Uninitialized variable tracking
         TEST_CASE(uninitVariable);
+
+        // Phase F — Float/double value tracking
+        TEST_CASE(floatPropagation);
+
+        // Phase S — String literal non-null tracking
+        TEST_CASE(stringLiteralNonNull);
+
+        // Phase U2 — Enhanced uninit tracking (survives function calls)
+        TEST_CASE(uninitAfterCall);
+
+        // Phase M — Struct/class member field tracking
+        TEST_CASE(memberFieldPropagation);
+
+        // Phase C — Container size tracking
+        TEST_CASE(containerSize);
 
         // False-positive regression tests (grows as trac tickets are resolved)
         TEST_CASE(falsePositiveRegression);
@@ -672,6 +688,338 @@ private:
                                 "  g(x);\n"                 // 4  ← x is UNINIT (arg read)
                                 "}\n";
             ASSERT(testValueOfXUninit(code, 4));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional helpers for new phases
+    // -----------------------------------------------------------------------
+
+    /// Returns true when the first token named "x" at line `linenr` has a
+    /// Known float value approximately equal to `value` (within 1e-9).
+    ///
+    /// Phase F: float/double variables are annotated with FLOAT values;
+    /// this helper verifies the annotation.
+    bool testValueOfXFloat(const char code[], unsigned int linenr, double value) {
+        SimpleTokenizer tokenizer(settings, *this);
+        if (!tokenizer.tokenize(code))
+            return false;
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [value](const ValueFlow::Value& v) {
+                return v.isFloatValue() && v.isKnown() &&
+                       std::abs(v.floatValue - value) < 1e-9;
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    /// Returns true when the first token named "x" at line `linenr` has
+    /// a Known CONTAINER_SIZE value equal to `size`, using `s` as settings
+    /// (so callers can pass settings with std.cfg loaded).
+    ///
+    /// Phase C: container variables are annotated with CONTAINER_SIZE values;
+    /// this helper verifies the annotation on the container variable token.
+    bool testContainerSizeKnown(const char code[], unsigned int linenr, int size,
+                                const Settings& s) {
+        SimpleTokenizer tokenizer(s, *this);
+        if (!tokenizer.tokenize(code))
+            return false;
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [size](const ValueFlow::Value& v) {
+                return v.isContainerSizeValue() && v.isKnown() &&
+                       v.intvalue == size;
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase F — Float/double value tracking
+    // -----------------------------------------------------------------------
+    //
+    // Float/double/long double scalar variables are tracked in the same
+    // DFState as integer variables, using FLOAT values with floatValue set.
+    // evalConstFloat() folds constant float expressions; annotateTok() writes
+    // FLOAT values onto tokens just like it does for INT values.
+    void floatPropagation() {
+        // F1: simple assignment from a float literal.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x = 3.14;\n"      // 2
+                                "  (void)x;\n"              // 3  ← x is 3.14 (Known FLOAT)
+                                "}\n";
+            ASSERT(testValueOfXFloat(code, 3, 3.14));
+        }
+
+        // F2: float variable without initializer is UNINIT.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x;\n"             // 2  ← no initializer
+                                "  (void)x;\n"              // 3  ← x is UNINIT
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 3));
+        }
+
+        // F3: float assignment from another float literal (re-assignment).
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x = 1.0;\n"       // 2
+                                "  x = 2.5;\n"              // 3
+                                "  (void)x;\n"              // 4  ← x is 2.5
+                                "}\n";
+            ASSERT(testValueOfXFloat(code, 4, 2.5));
+            ASSERT(!testValueOfXFloat(code, 4, 1.0));
+        }
+
+        // F4: float arithmetic — constant folding.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x = 1.5 + 2.5;\n" // 2
+                                "  (void)x;\n"              // 3  ← x is 4.0
+                                "}\n";
+            ASSERT(testValueOfXFloat(code, 3, 4.0));
+        }
+
+        // F5: float += compound assignment.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x = 3.0;\n"       // 2
+                                "  x += 1.5;\n"             // 3
+                                "  (void)x;\n"              // 4  ← x is 4.5
+                                "}\n";
+            ASSERT(testValueOfXFloat(code, 4, 4.5));
+        }
+
+        // F6: float copy propagation.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  double x = 2.0;\n"       // 2
+                                "  double y = x;\n"         // 3  ← x used here: 2.0
+                                "}\n";
+            ASSERT(testValueOfXFloat(code, 3, 2.0));
+        }
+
+        // F7: float assigned from unknown — no known value.
+        {
+            const char code[] = "void f(double d) {\n"      // 1
+                                "  double x = d;\n"         // 2
+                                "  (void)x;\n"              // 3  ← no known float value
+                                "}\n";
+            ASSERT(!testValueOfXFloat(code, 3, 0.0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase S — String literal non-null tracking
+    // -----------------------------------------------------------------------
+    //
+    // Assigning a string literal to a pointer variable stores an Impossible(0)
+    // value on the pointer, indicating the pointer is definitely NOT null.
+    // This allows CheckNullPointer to suppress spurious warnings about string
+    // literal pointers being dereferenced.
+    void stringLiteralNonNull() {
+        // S1: const char *x = "hello" → x is Impossible null (NOT null).
+        {
+            const char code[] = "void f() {\n"                    // 1
+                                "  const char *x = \"hello\";\n"  // 2
+                                "  (void)*x;\n"                   // 3  ← x is Impossible 0
+                                "}\n";
+            ASSERT(testValueOfXImpossible(code, 3, 0));
+        }
+
+        // S2: nullptr assignment is still Known null (existing Phase N).
+        {
+            const char code[] = "void f() {\n"            // 1
+                                "  const char *x = 0;\n"  // 2
+                                "  (void)*x;\n"           // 3  ← x IS null (Known 0)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 0));
+        }
+
+        // S3: re-assignment from string literal clears the null value.
+        {
+            const char code[] = "void f() {\n"                    // 1
+                                "  const char *x = nullptr;\n"    // 2  ← Known null
+                                "  x = \"world\";\n"              // 3  ← reassign to literal
+                                "  (void)*x;\n"                   // 4  ← x is Impossible 0
+                                "}\n";
+            ASSERT(testValueOfXImpossible(code, 4, 0));
+            ASSERT(!testValueOfXKnown(code, 4, 0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase U2 — Enhanced UNINIT tracking (survives function calls)
+    // -----------------------------------------------------------------------
+    //
+    // Variables declared without an initializer are added to a persistent
+    // DFUninitSet.  After any function call clears the main state, UNINIT
+    // (Possible) is re-injected for every variable still in the set.
+    // This ensures that "still uninit" variables remain detectable even
+    // after conservative state clearing.
+    void uninitAfterCall() {
+        // U2.1: variable remains UNINIT(Possible) at a use after a function call.
+        {
+            const char code[] = "void g(int);\n"           // 1
+                                "void f() {\n"             // 2
+                                "  int x;\n"               // 3
+                                "  g(x);\n"                // 4
+                                "  (void)x;\n"             // 5  ← still UNINIT (Possible)
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 5));
+        }
+
+        // U2.2: once assigned, the variable is removed from the uninit set
+        //       and must NOT be re-injected after a subsequent call.
+        {
+            const char code[] = "void g();\n"              // 1
+                                "void f() {\n"             // 2
+                                "  int x;\n"               // 3
+                                "  x = 5;\n"               // 4  ← assigned: removed from set
+                                "  g();\n"                 // 5
+                                "  (void)x;\n"             // 6  ← x is NOT UNINIT here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
+
+        // U2.3: variable is UNINIT before the call (existing Phase U) AND
+        //       still Possible-UNINIT after the call (Phase U2).
+        {
+            const char code[] = "void g(int);\n"           // 1
+                                "void f() {\n"             // 2
+                                "  int x;\n"               // 3
+                                "  g(x);\n"                // 4  ← UNINIT at arg read
+                                "  (void)x;\n"             // 5  ← UNINIT still possible
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 4));
+            ASSERT(testValueOfXUninit(code, 5));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase M — Struct/class member field tracking
+    // -----------------------------------------------------------------------
+    //
+    // "obj.field = value" assignments are stored in DFMemberState keyed by
+    // (objectVarId, fieldVarId).  "obj.field" reads are annotated from the
+    // member state.  The member state is forked at branches and merged at
+    // join points using the same rules as the main state.
+    void memberFieldPropagation() {
+        // M1: simple member assignment and read.
+        {
+            const char code[] = "struct S { int x; };\n"  // 1
+                                "void f() {\n"             // 2
+                                "  S obj;\n"               // 3
+                                "  obj.x = 5;\n"           // 4
+                                "  (void)obj.x;\n"         // 5  ← x is 5 (Known)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 5, 5));
+        }
+
+        // M2: member re-assignment — second value replaces first.
+        {
+            const char code[] = "struct S { int x; };\n"  // 1
+                                "void f() {\n"             // 2
+                                "  S obj;\n"               // 3
+                                "  obj.x = 5;\n"           // 4
+                                "  obj.x = 10;\n"          // 5
+                                "  (void)obj.x;\n"         // 6  ← x is 10 (Known)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 6, 10));
+            ASSERT(!testValueOfXKnown(code, 6, 5));
+        }
+
+        // M3: member state is cleared after a function call (conservative).
+        {
+            const char code[] = "struct S { int x; };\n"  // 1
+                                "void g();\n"              // 2
+                                "void f() {\n"             // 3
+                                "  S obj;\n"               // 4
+                                "  obj.x = 5;\n"           // 5
+                                "  g();\n"                 // 6  ← call clears member state
+                                "  (void)obj.x;\n"         // 7  ← x has NO known value
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 7, 5));
+        }
+
+        // M4: member assignment from expression.
+        {
+            const char code[] = "struct S { int x; };\n"  // 1
+                                "void f() {\n"             // 2
+                                "  S obj;\n"               // 3
+                                "  obj.x = 3 + 4;\n"       // 4
+                                "  (void)obj.x;\n"         // 5  ← x is 7 (Known)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 5, 7));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase C — Container size tracking
+    // -----------------------------------------------------------------------
+    //
+    // Container variables (std::vector, etc.) are tracked in DFContState
+    // using CONTAINER_SIZE values.  push_back/emplace_back increment the
+    // known size; pop_back decrements it; clear resets to 0.  The container
+    // variable token is annotated with the current size whenever it is read.
+    //
+    // Note: container type detection requires the standard library cfg to be
+    // loaded.  Tests use a local settings with "std.cfg".
+    void containerSize() {
+        const Settings stdSettings =
+            settingsBuilder().checkLevel(Settings::CheckLevel::normal)
+                             .library("std.cfg")
+                             .build();
+
+        // C1: default-constructed vector has Known size 0.
+        {
+            const char code[] = "void f() {\n"                         // 1
+                                "  std::vector<int> x;\n"              // 2
+                                "  (void)x;\n"                         // 3  ← size 0
+                                "}\n";
+            ASSERT(testContainerSizeKnown(code, 3, 0, stdSettings));
+        }
+
+        // C2: one push_back increments size to 1.
+        {
+            const char code[] = "void f() {\n"                         // 1
+                                "  std::vector<int> x;\n"              // 2
+                                "  x.push_back(1);\n"                  // 3
+                                "  (void)x;\n"                         // 4  ← size 1
+                                "}\n";
+            ASSERT(testContainerSizeKnown(code, 4, 1, stdSettings));
+        }
+
+        // C3: push_back then pop_back returns to size 0.
+        {
+            const char code[] = "void f() {\n"                         // 1
+                                "  std::vector<int> x;\n"              // 2
+                                "  x.push_back(1);\n"                  // 3
+                                "  x.pop_back();\n"                    // 4
+                                "  (void)x;\n"                         // 5  ← size 0
+                                "}\n";
+            ASSERT(testContainerSizeKnown(code, 5, 0, stdSettings));
+        }
+
+        // C4: clear() resets size to 0 regardless of previous size.
+        {
+            const char code[] = "void f() {\n"                         // 1
+                                "  std::vector<int> x;\n"              // 2
+                                "  x.push_back(1);\n"                  // 3
+                                "  x.push_back(2);\n"                  // 4
+                                "  x.push_back(3);\n"                  // 5
+                                "  x.clear();\n"                       // 6
+                                "  (void)x;\n"                         // 7  ← size 0
+                                "}\n";
+            ASSERT(testContainerSizeKnown(code, 7, 0, stdSettings));
         }
     }
 
