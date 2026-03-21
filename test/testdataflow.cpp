@@ -76,6 +76,12 @@ private:
         // Phase 6 — Complexity abort: no false positives
         TEST_CASE(complexityAbort);
 
+        // Phase N — Null pointer tracking
+        TEST_CASE(nullPointer);
+
+        // Phase U — Uninitialized variable tracking
+        TEST_CASE(uninitVariable);
+
         // False-positive regression tests (grows as trac tickets are resolved)
         TEST_CASE(falsePositiveRegression);
     }
@@ -132,6 +138,27 @@ private:
             if (std::any_of(tok->values().cbegin(), tok->values().cend(),
                             [value](const ValueFlow::Value& v) {
                 return v.isIntValue() && v.isImpossible() && v.intvalue == value;
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    /// Returns true when the first token named "x" at line `linenr` has a
+    /// UNINIT value (indicating the variable is uninitialized at that point).
+    ///
+    /// Phase U: CheckUninitVar reads UNINIT values placed on tokens by the
+    /// analysis; this helper verifies that annotation is happening.
+    bool testValueOfXUninit(const char code[], unsigned int linenr) {
+        SimpleTokenizer tokenizer(settings, *this);
+        if (!tokenizer.tokenize(code))
+            return false;
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [](const ValueFlow::Value& v) {
+                return v.isUninitValue();
             }))
                 return true;
         }
@@ -497,6 +524,154 @@ private:
             // After aborting, x must not be Known 99 (that would be a FP
             // since x is only 99 on one deeply-nested path).
             ASSERT(!testValueOfXKnown(code, 14, 99));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase N — Null pointer tracking
+    // -----------------------------------------------------------------------
+    //
+    // Null pointers are represented as a ValueFlow::Value with intvalue==0,
+    // identical to the main ValueFlow analysis.  CheckNullPointer uses
+    // Token::getValue(0) to detect null values, so no checker changes are
+    // needed — only the annotation must be correct.
+    void nullPointer() {
+        // N1: simple assignment p = nullptr → p is Known null (0) at the use.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int *x = nullptr;\n"     // 2
+                                "  (void)*x;\n"             // 3  ← x is Known 0 (null)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 0));
+        }
+
+        // N2: condition "if (x == nullptr)" → x is Known null inside then-block.
+        {
+            const char code[] = "void f(int *x) {\n"        // 1
+                                "  if (x == nullptr) {\n"   // 2
+                                "    (void)*x;\n"           // 3  ← x is Known 0 inside
+                                "  }\n"                     // 4
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 0));
+        }
+
+        // N3: condition "if (x != nullptr)" → x is definitely NOT null inside
+        //     then-block (Impossible 0).
+        {
+            const char code[] = "void f(int *x) {\n"        // 1
+                                "  if (x != nullptr) {\n"   // 2
+                                "    (void)*x;\n"           // 3  ← x is Impossible 0
+                                "  }\n"                     // 4
+                                "}\n";
+            ASSERT(testValueOfXImpossible(code, 3, 0));
+        }
+
+        // N4: condition "if (!x)" → x IS null in then-block (Known 0).
+        {
+            const char code[] = "void f(int *x) {\n"        // 1
+                                "  if (!x) {\n"             // 2
+                                "    (void)*x;\n"           // 3  ← x is Known 0
+                                "  }\n"                     // 4
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 0));
+        }
+
+        // N5: condition "if (x)" → x is NOT null in then-block (Impossible 0).
+        {
+            const char code[] = "void f(int *x) {\n"        // 1
+                                "  if (x) {\n"              // 2
+                                "    (void)*x;\n"           // 3  ← x is Impossible 0
+                                "  }\n"                     // 4
+                                "}\n";
+            ASSERT(testValueOfXImpossible(code, 3, 0));
+        }
+
+        // N6: backward propagation of null constraint from condition to earlier use.
+        //     if (x == nullptr) {} → before the condition, x possibly IS null.
+        {
+            const char code[] = "void f(int *x) {\n"        // 1
+                                "  (void)x;\n"              // 2  ← backward: x possibly 0
+                                "  if (x == nullptr) {}\n"  // 3
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 2, 0));
+        }
+
+        // N7: assignment to a non-null value clears the null tracking.
+        //     After "x = &y", x should not have a Known null value.
+        {
+            const char code[] = "void f(int *x, int *y) {\n" // 1
+                                "  x = nullptr;\n"           // 2
+                                "  x = y;\n"                 // 3
+                                "  (void)*x;\n"              // 4  ← x is no longer null
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase U — Uninitialized variable tracking
+    // -----------------------------------------------------------------------
+    //
+    // Local variables declared without an initializer receive a UNINIT value
+    // in the forward state.  Reads before any assignment are annotated with
+    // UNINIT so that CheckUninitVar can flag the uninitialized use.
+    void uninitVariable() {
+        // U1: uninitialized integer — x is UNINIT at the use site.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int x;\n"                // 2  ← declared without init
+                                "  (void)x;\n"             // 3  ← x is UNINIT here
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 3));
+        }
+
+        // U2: initialized integer — x must NOT be marked UNINIT.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int x = 5;\n"            // 2  ← has initializer
+                                "  (void)x;\n"              // 3  ← x is NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 3));
+        }
+
+        // U3: assignment clears UNINIT — after "x = 5", x is no longer uninit.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int x;\n"                // 2
+                                "  x = 5;\n"               // 3  ← assignment clears UNINIT
+                                "  (void)x;\n"             // 4  ← x is NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 4));
+        }
+
+        // U4: uninitialized pointer — x (a pointer) is UNINIT at the use site.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int *x;\n"               // 2  ← pointer without init
+                                "  (void)*x;\n"            // 3  ← x is UNINIT here
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 3));
+        }
+
+        // U5: function argument is NOT marked uninit — it was initialized by caller.
+        {
+            const char code[] = "void f(int x) {\n"         // 1
+                                "  (void)x;\n"              // 2  ← parameter, NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 2));
+        }
+
+        // U6: variable used as a function argument before any assignment is UNINIT.
+        //     After the call, state is conservatively cleared (the callee might
+        //     have modified the variable through a pointer), so we only check the
+        //     argument read inside the call, not a subsequent use.
+        {
+            const char code[] = "void g(int);\n"            // 1
+                                "void f() {\n"              // 2
+                                "  int x;\n"                // 3
+                                "  g(x);\n"                 // 4  ← x is UNINIT (arg read)
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 4));
         }
     }
 

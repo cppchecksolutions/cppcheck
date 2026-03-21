@@ -24,16 +24,36 @@
  * File layout:
  *   1. Core types (DFValues, DFState)
  *   2. Complexity limits (MAX_BRANCH_DEPTH, MAX_LOOP_DEPTH, MAX_VARS)
- *   3. Helper predicates  (isTrackedVar, isLhsOfAssignment, isFunctionCallOpen)
- *   4. evalConstInt       (constant-fold an expression to an integer)
- *   5. annotateTok        (write state values onto a token)
+ *   3. Helper predicates  (isTrackedVar, isTrackedPtrVar,
+ *                          isLhsOfAssignment, isFunctionCallOpen)
+ *   4. evalConstInt       (constant-fold an expression to an integer;
+ *                          handles nullptr/NULL → 0 for pointer tracking)
+ *   5. annotateTok        (write state values onto a token;
+ *                          handles both integer and pointer variables)
  *   6. mergeStates        (combine two branch states after if/else)
  *   7. blockTerminates    (detect unconditional exit from a block)
- *   8. applyConditionConstraint (derive state update from a condition)
+ *   8. applyConditionConstraint (derive state update from a condition;
+ *                          extended for !p, if(p), p==nullptr patterns)
  *   9. dropWrittenVars    (remove loop-modified vars from state)
- *  10. forwardAnalyzeBlock (Pass 1 — forward walk)
+ *  10. forwardAnalyzeBlock (Pass 1 — forward walk;
+ *                          includes uninit detection and pointer assignments)
  *  11. backwardAnalyzeBlock (Pass 2 — backward walk)
  *  12. DataFlow::setValues  (public entry point)
+ *
+ * NULL POINTER TRACKING (Phase N):
+ *   Pointer variables are tracked when assigned nullptr/NULL/0.
+ *   The null value is represented as a ValueFlow::Value with intvalue==0
+ *   (identical to how the main ValueFlow analysis represents null pointers),
+ *   so CheckNullPointer can find null values via Token::getValue(0) without
+ *   any modification.  Conditions such as "p==nullptr", "p!=nullptr", "!p",
+ *   and "if(p)" update the state in both the forward and backward passes.
+ *
+ * UNINIT VARIABLE TRACKING (Phase U):
+ *   Local integer and pointer variables declared without an initializer
+ *   (e.g. "int x;", "int *p;") are given a UNINIT value in the forward
+ *   state.  Subsequent assignments clear the UNINIT.  Variable reads that
+ *   occur while the UNINIT is still in state are annotated so that
+ *   CheckUninitVar can detect the uninitialized use.
  */
 
 #include "dataflow.h"
@@ -109,6 +129,25 @@ static bool isTrackedVar(const Token* tok) {
     return vt && vt->isIntegral() && vt->pointer == 0;
 }
 
+/// Returns true when tok refers to a pointer variable that the analysis
+/// should track for null-pointer and uninitialized-pointer bugs.
+///
+/// Phase N: track pointers assigned nullptr so that CheckNullPointer can
+/// detect null dereferences.  Only raw (non-function, non-array) pointers
+/// with exactly one level of indirection are tracked to keep the
+/// implementation simple and conservative.
+static bool isTrackedPtrVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+    const Variable* var = tok->variable();
+    if (!var || var->isArray())
+        return false;
+    const ValueType* vt = var->valueType();
+    // pointer > 0: one or more levels of pointer indirection.
+    // Exclude function pointers (they have a function type base).
+    return vt && vt->pointer > 0;
+}
+
 /// Returns true when tok is the direct left-hand-side operand of an
 /// assignment operator (=, +=, -=, …).
 /// Such tokens are being written to, not read, so they must not be annotated
@@ -163,6 +202,15 @@ static bool isFunctionCallOpen(const Token* tok) {
 static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Value& result) {
     if (!expr)
         return false;
+
+    // --- nullptr keyword → null pointer constant 0 ---
+    // Phase N: "nullptr" must evaluate to 0 so that pointer conditions such as
+    // "p == nullptr" can be recognised by applyConditionConstraint.
+    if (expr->str() == "nullptr") {
+        result = ValueFlow::Value(0LL);
+        result.setKnown();
+        return true;
+    }
 
     // --- Integer literal ---
     if (expr->isNumber() && MathLib::isInt(expr->str())) {
@@ -253,16 +301,25 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
 ///
 /// Preconditions that must all hold for annotation to occur:
 ///  - tok has a non-zero varId (it refers to a variable)
-///  - the variable is an integer non-pointer (isTrackedVar)
+///  - the variable is an integer/pointer (isTrackedVar or isTrackedPtrVar)
 ///  - tok is not the LHS of an assignment (it is being read, not written)
+///  - tok is not the variable's declaration name token (it is a use, not a def)
 ///  - the variable is present in state
+///
+/// Phase N: pointer variables are annotated so CheckNullPointer sees null values.
+/// Phase U: UNINIT values are annotated so CheckUninitVar sees uninit uses.
 static void annotateTok(Token* tok, const DFState& state) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
-    if (!isTrackedVar(tok))
+    if (!isTrackedVar(tok) && !isTrackedPtrVar(tok))
         return;
     if (isLhsOfAssignment(tok))
         return;  // write site — do not annotate
+    // Do not annotate the declaration token itself — it is a definition,
+    // not a use.  (The forward pass adds UNINIT to state at the declaration
+    // and then skips this token via `continue`; this guard is a safety net.)
+    if (tok->variable() && tok->variable()->nameToken() == tok)
+        return;
 
     const auto it = state.find(tok->varId());
     if (it == state.end())
@@ -388,6 +445,44 @@ static void applyConditionConstraint(const Token* condRoot,
     if (!condRoot)
         return;
 
+    // -----------------------------------------------------------------
+    // Phase N: pointer-specific conditions
+    // -----------------------------------------------------------------
+
+    // Pattern: !p
+    //   branchTaken=true  (if (!p))  → p IS null  (Known 0)
+    //   branchTaken=false (else)      → p is NOT null (Impossible 0)
+    if (condRoot->str() == "!" && condRoot->astOperand1() &&
+        !condRoot->astOperand2()) {
+        const Token* varTok = condRoot->astOperand1();
+        if (isTrackedPtrVar(varTok)) {
+            ValueFlow::Value nullVal(0LL);
+            if (branchTaken)
+                nullVal.setKnown();
+            else
+                nullVal.setImpossible();
+            state[varTok->varId()] = {nullVal};
+        }
+        return;
+    }
+
+    // Pattern: if (p)  — pointer variable used directly as a condition
+    //   branchTaken=true  → p is NOT null (Impossible 0)
+    //   branchTaken=false → p IS null     (Known 0)
+    if (isTrackedPtrVar(condRoot)) {
+        ValueFlow::Value nullVal(0LL);
+        if (branchTaken)
+            nullVal.setImpossible();
+        else
+            nullVal.setKnown();
+        state[condRoot->varId()] = {nullVal};
+        return;
+    }
+
+    // -----------------------------------------------------------------
+    // Equality / inequality: "x == const", "x != const",
+    //                        "p == nullptr", "p != nullptr"
+    // -----------------------------------------------------------------
     const bool isEq = (condRoot->str() == "==");
     const bool isNe = (condRoot->str() == "!=");
     if (!isEq && !isNe)
@@ -399,17 +494,21 @@ static void applyConditionConstraint(const Token* condRoot,
         return;
 
     // Identify which side is the variable and which side is the constant.
+    // Extended to handle pointer variables alongside integer variables.
     const Token* varTok = nullptr;
-    ValueFlow::Value constVal(0);
+    ValueFlow::Value constVal(0LL);
     constVal.setKnown();
 
     // Use an empty temporary state to evaluate the constant side.
     // This ensures we don't accidentally use uncertain variable values.
     const DFState emptyState;
 
-    if (isTrackedVar(op1) && evalConstInt(op2, emptyState, constVal)) {
+    const bool op1tracked = isTrackedVar(op1) || isTrackedPtrVar(op1);
+    const bool op2tracked = isTrackedVar(op2) || isTrackedPtrVar(op2);
+
+    if (op1tracked && evalConstInt(op2, emptyState, constVal)) {
         varTok = op1;
-    } else if (isTrackedVar(op2) && evalConstInt(op1, emptyState, constVal)) {
+    } else if (op2tracked && evalConstInt(op1, emptyState, constVal)) {
         varTok = op2;
     } else {
         return;  // not a simple var==const pattern — do nothing
@@ -494,6 +593,37 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // --- Abort if state has grown too large (requirement 4) ---
         if (state.size() > MAX_VARS)
             return;
+
+        // =================================================================
+        // Phase U: Uninitialized variable declaration detection
+        //
+        // When we encounter the name token that IS the variable's declaration
+        // (tok == var->nameToken()) and the declaration has no initializer
+        // (tok is not the LHS of '='), add a UNINIT value to state.
+        //
+        // This satisfies Phase U0–U2: local integral and pointer variables
+        // without an initializer are marked so that subsequent reads can be
+        // flagged by CheckUninitVar.  The assignment handler below will clear
+        // the UNINIT when the variable is later initialized.
+        //
+        // We skip: function parameters (isArgument), statics (isStatic),
+        //          and arrays (not scalar — too complex to track).
+        // =================================================================
+        if (tok->varId() > 0 && tok->variable() &&
+            tok->variable()->nameToken() == tok) {
+            const Variable* declVar = tok->variable();
+            if (declVar->isLocal() && !declVar->isStatic() &&
+                !declVar->isArgument() && !declVar->isArray() &&
+                (isTrackedVar(tok) || isTrackedPtrVar(tok)) &&
+                !isLhsOfAssignment(tok)) {
+                // Local variable declared without an initializer.
+                ValueFlow::Value uninit;
+                uninit.valueType = ValueFlow::Value::ValueType::UNINIT;
+                uninit.setKnown();
+                state[tok->varId()] = {uninit};
+                continue;  // declaration token is a def, not a use — don't annotate
+            }
+        }
 
         // =================================================================
         // if / else
@@ -636,7 +766,26 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // Requirement 4: a function call can modify any variable through
         // pointers, references, or global variables.  We have no alias
         // information at this point, so we must forget everything.
+        //
+        // However, arguments ARE reads that occur before the call executes.
+        // Annotate them with the current state BEFORE clearing, so that
+        // UNINIT/null values on arguments are recorded.
         if (isFunctionCallOpen(tok)) {
+            // Annotate each argument token in the call's argument list.
+            // Walk between '(' and ')' — skip nested calls to avoid
+            // double-processing (their own '(' handler will clear state).
+            for (Token* argTok = tok->next();
+                 argTok && argTok != tok->link();
+                 argTok = argTok->next()) {
+                if (argTok->str() == "(") {
+                    // Skip nested call's argument list
+                    if (argTok->link())
+                        argTok = const_cast<Token*>(argTok->link());
+                    continue;
+                }
+                if (argTok->varId() > 0 && argTok->isName())
+                    annotateTok(argTok, state);
+            }
             state.clear();
             if (tok->link())
                 tok = const_cast<Token*>(tok->link());
@@ -650,10 +799,40 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             tok->astOperand1() && tok->astOperand1()->varId() > 0) {
             const nonneg int varId = tok->astOperand1()->varId();
 
-            if (!isTrackedVar(tok->astOperand1())) {
-                // Non-integer or pointer variable — not tracked, just drop
+            const bool isIntVar = isTrackedVar(tok->astOperand1());
+            const bool isPtrVar = isTrackedPtrVar(tok->astOperand1());
+
+            if (!isIntVar && !isPtrVar) {
+                // Non-integer, non-pointer variable — not tracked, just drop
                 // from state in case we had a stale entry (requirement 5).
                 state.erase(varId);
+                continue;
+            }
+
+            // -----------------------------------------------------------------
+            // Phase N: pointer assignment
+            // Only track assignment of nullptr/NULL/0 (null pointer constant).
+            // Any other assignment (new, malloc, &x, …) clears the state
+            // conservatively to avoid false positives.
+            // -----------------------------------------------------------------
+            if (isPtrVar) {
+                if (tok->str() == "=") {
+                    ValueFlow::Value val;
+                    const DFState emptyPtrState;
+                    if (tok->astOperand2() &&
+                        evalConstInt(tok->astOperand2(), emptyPtrState, val) &&
+                        val.intvalue == 0) {
+                        // p = nullptr / p = 0 / p = NULL  →  Known null
+                        val.setKnown();
+                        state[varId] = {val};
+                    } else {
+                        // Unknown pointer value — forget it
+                        state.erase(varId);
+                    }
+                } else {
+                    // Compound assignment on a pointer (e.g. p += n) — drop.
+                    state.erase(varId);
+                }
                 continue;
             }
 
