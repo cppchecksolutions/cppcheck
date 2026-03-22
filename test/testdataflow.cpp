@@ -612,6 +612,21 @@ private:
                                 "}\n";
             ASSERT(testValueOfXKnown(code, 6, 0));
         }
+
+        // Task NW3: do-while loop with null-guard && condition.
+        // After "do { x = x->next; } while (x && x->n > 0)", the loop exits
+        // when the condition is false — which happens when x is null.
+        // Requirement: x must carry a Possible null (0) value after the loop.
+        {
+            const char code[] = "struct S { int n; struct S* next; };\n"  // 1
+                                "int foo(struct S* x) {\n"                 // 2
+                                "   do {\n"                                 // 3
+                                "       x = x->next;\n"                    // 4
+                                "   } while (x && x->n > 0);\n"           // 5
+                                "   (void)x;\n"                            // 6
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 6, 0));
+        }
     }
 
     // -----------------------------------------------------------------------

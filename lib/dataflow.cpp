@@ -1426,12 +1426,33 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             tok = const_cast<Token*>(bodyClose);
 
             // do-while: skip the trailing  while ( cond ) ;
+            // Phase NW: also apply null constraints from the do-while condition.
+            // When the loop exits its condition was false, so any pointer that
+            // is null-guarded in the condition may be null after the loop.
+            //   "do { } while (p)"       → p is definitely null (Known null).
+            //   "do { } while (p && ...)" → p is possibly null (Possible null).
             if (tok->next() && tok->next()->str() == "while") {
                 const Token* wCond = tok->next()->next();
                 if (wCond && wCond->str() == "(") {
                     const Token* wCondClose = wCond->link();
-                    if (wCondClose && wCondClose->next())
+                    if (wCondClose && wCondClose->next()) {
                         tok = const_cast<Token*>(wCondClose->next()); // points to ";"
+
+                        // Extract the condition root and inject null constraints,
+                        // mirroring the regular while-loop handling above.
+                        const Token* condRoot = wCond->astOperand2();
+                        if (condRoot) {
+                            if (isTrackedPtrVar(condRoot)) {
+                                // Simple "do { } while (p)": exits iff p is null.
+                                applyConditionConstraint(condRoot, ctx.state,
+                                                         ctx.members,
+                                                         /*branchTaken=*/false);
+                            } else if (condRoot->str() == "&&") {
+                                // AND-chain: p might be null on exit → Possible null.
+                                collectWhileExitConstraints(condRoot, ctx.state);
+                            }
+                        }
+                    }
                 }
             }
             continue;
