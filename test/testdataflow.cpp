@@ -633,16 +633,17 @@ private:
     // Phase 5 — Forward: function calls (conservative)
     // -----------------------------------------------------------------------
     void forwardFunctionCalls() {
-        // Task 5.1: function call clears all tracked state.
-        // After foo(), x's previously known value is no longer reliable.
+        // Task 5.1: local scalar variables survive a function call.
+        // x is a local int; foo() has no parameters and cannot access x,
+        // so x remains known as 5 after the call.
         {
             const char code[] = "void foo();\n"        // 1
                                 "void f() {\n"          // 2
                                 "  int x = 5;\n"        // 3
                                 "  foo();\n"            // 4
-                                "  (void)x;\n"          // 5  ← no known value after call
+                                "  (void)x;\n"          // 5  ← x is still 5 (local scalar)
                                 "}\n";
-            ASSERT(!testValueOfXKnown(code, 5, 5));
+            ASSERT(testValueOfXKnown(code, 5, 5));
         }
 
         // Task 5.2: variables assigned AFTER a call are still tracked.

@@ -203,6 +203,18 @@ struct DFContext {
     DFMemberState members;     ///< (objVarId, fieldVarId) → values  (Phase M)
     DFContState   containers;  ///< container varId → CONTAINER_SIZE  (Phase C)
     DFUninitSet   uninits;     ///< declared-without-init varIds       (Phase U2)
+
+    /// Requirement (Phase L): varIds of local, non-pointer, non-reference,
+    /// non-static scalar variables.  These cannot be modified by a called
+    /// function unless their address has been taken.  Populated when a
+    /// variable declaration is first encountered; never cleared.
+    std::unordered_set<nonneg int> localScalars;
+
+    /// Requirement (Phase L): varIds whose address has been observed taken
+    /// via the unary '&' operator.  A local scalar in this set is excluded
+    /// from the "safe to preserve" set at call sites, because a called
+    /// function could reach it through a pointer that holds &var.
+    std::unordered_set<nonneg int> addressTaken;
 };
 
 
@@ -1273,6 +1285,14 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (declVar->isLocal() && !declVar->isStatic() &&
                 !declVar->isArgument() && !declVar->isArray()) {
 
+                // Phase L: track local scalar variables that a called function
+                // cannot modify (non-pointer, non-reference, non-volatile).
+                // Containers are excluded — they are handled by Phase C.
+                if (!declVar->isPointer() && !declVar->isReference() &&
+                    !declVar->isVolatile() && !isTrackedContainerVar(tok)) {
+                    ctx.localScalars.insert(tok->varId());
+                }
+
                 // Phase C: default-constructed container → size 0
                 if (isTrackedContainerVar(tok)) {
                     // Only initialise if there is no following '{' (list init)
@@ -1629,8 +1649,24 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
             }
 
-            // Clear the main state and member state.
-            ctx.state.clear();
+            // Phase L: selectively clear state, preserving local scalars
+            // whose address has not been taken.
+            //
+            // Requirement: a local, non-pointer, non-reference, non-volatile
+            // scalar variable whose address was never observed via unary '&'
+            // cannot be modified by any called function (intra-procedural
+            // analysis, no aliasing).  Its value is therefore still valid
+            // after the call and must be retained to avoid false negatives.
+            //
+            // All other tracked variables (globals, pointers, references,
+            // address-taken locals, member state) are conservatively cleared.
+            for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
+                const nonneg int varId = it->first;
+                if (ctx.localScalars.count(varId) && !ctx.addressTaken.count(varId))
+                    ++it;  // safe: local scalar, address not taken — preserve
+                else
+                    it = ctx.state.erase(it);
+            }
             ctx.members.clear();
             // Only clear container state for non-container-method calls.
             if (!isKnownContainerMethod)
@@ -1855,6 +1891,20 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 ctx.state.erase(varId);
             }
             continue;
+        }
+
+        // =================================================================
+        // Phase L: track address-taken local scalars
+        // =================================================================
+        // Requirement: if '&' is applied to a local scalar (unary address-of),
+        // the variable's address may escape and a called function could modify
+        // it through that pointer.  Remove the varId from localScalars so it
+        // is conservatively cleared at subsequent call sites.
+        if (tok->str() == "&" && !tok->astOperand2()) {
+            // Unary '&': the operand is the variable whose address is taken.
+            const Token* operand = tok->astOperand1();
+            if (operand && operand->varId() > 0)
+                ctx.addressTaken.insert(operand->varId());
         }
 
         // =================================================================
