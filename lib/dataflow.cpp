@@ -1814,10 +1814,30 @@ void setValues(TokenList& tokenlist,
                ErrorLogger& errorLogger,
                const Settings& settings,
                TimerResultsIntf* timerResults) {
-    DF_UNUSED(tokenlist);
     DF_UNUSED(errorLogger);
     DF_UNUSED(settings);
     DF_UNUSED(timerResults);
+
+    // Requirement: annotate every integer and float literal token with its
+    // Known constant value.  Checkers such as checkZeroDivision and arrayIndex
+    // look up values via Token::getValue() / Token::getMaxValue(), so they
+    // must be present even when DataFlow (not the full ValueFlow) is active.
+    // This mirrors valueFlowNumber() / valueFlowSetConstantValue() in vf_common.cpp.
+    for (Token* tok = tokenlist.front(); tok; tok = tok->next()) {
+        if (tok->isNumber() && MathLib::isInt(tok->str())) {
+            // Integer literal: set its value as Known so getValue(N) finds it.
+            ValueFlow::Value v(MathLib::toBigNumber(tok->str()));
+            v.setKnown();
+            tok->addValue(v);
+        } else if (tok->isNumber() && MathLib::isFloat(tok->str())) {
+            // Float literal: set float value as Known.
+            ValueFlow::Value v;
+            v.valueType = ValueFlow::Value::ValueType::FLOAT;
+            v.floatValue = MathLib::toDoubleNumber(tok->str());
+            v.setKnown();
+            tok->addValue(v);
+        }
+    }
 
     for (const Scope& scope : symboldatabase.scopeList) {
         // Only analyse function bodies (requirement: intra-procedural only).

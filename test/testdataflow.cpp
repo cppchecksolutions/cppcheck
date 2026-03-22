@@ -37,6 +37,7 @@
 
 #include "fixture.h"
 #include "helpers.h"
+#include "mathlib.h"
 #include "settings.h"
 #include "token.h"
 #include "vfvalue.h"
@@ -100,6 +101,11 @@ private:
 
         // Phase Cast — Cast expression value propagation
         TEST_CASE(castValuePropagation);
+
+        // Literal constant annotation — integer/float literals must be annotated
+        // with their Known values so that checkers (checkZeroDivision, arrayIndex)
+        // can find them via getValue() in normal check level.
+        TEST_CASE(literalAnnotation);
 
         // False-positive regression tests (grows as trac tickets are resolved)
         TEST_CASE(falsePositiveRegression);
@@ -1101,6 +1107,50 @@ private:
                                 "}\n";
             ASSERT(testCastKnown(code, 2, 5));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Literal constant annotation
+    // -----------------------------------------------------------------------
+
+    /// Returns true when the first token with string `tokstr` at line `linenr`
+    /// has a Known integer value equal to `value`.
+    /// Requirement: DataFlow must annotate integer literals with their Known value
+    /// so that checkers (checkZeroDivision, arrayIndex) can find them via getValue().
+    bool testValueOfTokenKnown(const char code[], unsigned int linenr, const char* tokstr, MathLib::bigint value) {
+        SimpleTokenizer tokenizer(settings, *this);
+        if (!tokenizer.tokenize(code))
+            return false;
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != tokstr || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [value](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.isKnown() && v.intvalue == value;
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    void literalAnnotation() {
+        // Requirement: integer literal 0 in divisor position must be annotated
+        // with Known value 0 so that checkZeroDivision detects "return x / 0".
+        ASSERT(testValueOfTokenKnown("int f(int x) { return x / 0; }", 1, "0", 0));
+
+        // Requirement: integer literal 0 in modulo divisor must be annotated.
+        ASSERT(testValueOfTokenKnown("int f(int x) { return x % 0; }", 1, "0", 0));
+
+        // Requirement: integer literal array subscript must be annotated so that
+        // arrayIndex detects "int a[5]; a[5] = 0" (one-past-end).
+        ASSERT(testValueOfTokenKnown("void f() { int a[5]; a[5] = 0; }", 1, "5", 5));
+
+        // Requirement: negative literal subscript must be annotated so that
+        // arrayIndex detects "int a[5]; a[-1] = 0" (negative index).
+        ASSERT(testValueOfTokenKnown("void f() { int a[5]; a[-1] = 0; }", 1, "-1", -1));
+
+        // Requirement: well-past-end literal subscript must also be annotated.
+        ASSERT(testValueOfTokenKnown("void f() { int a[5]; a[10] = 0; }", 1, "10", 10));
     }
 
     // -----------------------------------------------------------------------
