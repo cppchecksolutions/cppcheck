@@ -35,6 +35,7 @@
  *  - testValueOfXNone(code, linenr)            → x has no values at all
  */
 
+#include "errortypes.h"
 #include "fixture.h"
 #include "helpers.h"
 #include "mathlib.h"
@@ -44,7 +45,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <list>
+#include <sstream>
 #include <string>
 
 class TestDataFlow : public TestFixture {
@@ -74,6 +77,30 @@ private:
 
         // Phase B1 — Backward: basic constraint propagation
         TEST_CASE(backwardConstraints);
+
+        // Phase R — Relational operator constraints (< > <= >=)
+        TEST_CASE(relationalConstraints);
+
+        // Phase OT — Operator token value annotation
+        TEST_CASE(operatorTokenValues);
+
+        // Phase UI — Unsigned integer impossible-value constraints
+        TEST_CASE(unsignedImpossible);
+
+        // Phase SW — Switch/case value propagation
+        TEST_CASE(switchVariable);
+
+        // Phase LB — For-loop variable bounds inside loop body
+        TEST_CASE(loopBounds);
+
+        // Phase BW — Bitwise operation value annotation
+        TEST_CASE(bitwiseOps);
+
+        // Phase TT — Type truncation on assignment
+        TEST_CASE(typeTruncation);
+
+        // Robustness: no crash or hang on pathological inputs
+        TEST_CASE(nocrash);
 
         // Phase 6 — Complexity abort: no false positives
         TEST_CASE(complexityAbort);
@@ -115,12 +142,82 @@ private:
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// Returns true when the first token named "x" at line `linenr` has a
-    /// Known integer value equal to `value`.
-    bool testValueOfXKnown(const char code[], unsigned int linenr, int value) {
+    // removeImpossible: filter impossible values out of a value list.
+    // Used by valueOfTok() to find the single "useful" non-impossible value.
+    static std::list<ValueFlow::Value> removeImpossible(std::list<ValueFlow::Value> values) {
+        values.remove_if(std::mem_fn(&ValueFlow::Value::isImpossible));
+        return values;
+    }
+
+    // removeSymbolicTok: filter symbolic and tok values out of a value list.
+    static std::list<ValueFlow::Value> removeSymbolicTok(std::list<ValueFlow::Value> values) {
+        values.remove_if([](const ValueFlow::Value& v) {
+            return v.isSymbolicValue() || v.isTokValue();
+        });
+        return values;
+    }
+
+    // tokenValues: returns all ValueFlow::Value objects on the first token
+    // matched by pattern `tokstr` (via Token::findmatch).  This enables
+    // assertions on operator tokens (e.g. "+", "-") and arbitrary patterns,
+    // not just on named variables.
+#define tokenValues(...) tokenValues_(__FILE__, __LINE__, __VA_ARGS__)
+    std::list<ValueFlow::Value> tokenValues_(const char* file, int line, const char code[], const char tokstr[], const Settings *s = nullptr) {
+        SimpleTokenizer tokenizer(s ? *s : settings, *this);
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
+        const Token *tok = Token::findmatch(tokenizer.tokens(), tokstr);
+        return tok ? tok->values() : std::list<ValueFlow::Value>();
+    }
+
+    // tokenValues overload: filter by ValueType after fetching.
+    std::list<ValueFlow::Value> tokenValues_(const char* file, int line, const char code[], const char tokstr[], ValueFlow::Value::ValueType vt) {
+        std::list<ValueFlow::Value> values = tokenValues_(file, line, code, tokstr);
+        values.remove_if([vt](const ValueFlow::Value& v) {
+            return v.valueType != vt;
+        });
+        return values;
+    }
+
+    // valueOfTok: returns the single non-impossible, non-tok value on the
+    // first token matched by `tokstr`, or a default Value() if there is not
+    // exactly one such value.  Mirrors the same helper in testvalueflow.cpp.
+#define valueOfTok(...) valueOfTok_(__FILE__, __LINE__, __VA_ARGS__)
+    ValueFlow::Value valueOfTok_(const char* file, int line, const char code[], const char tokstr[], const Settings *s = nullptr) {
+        std::list<ValueFlow::Value> values = removeImpossible(tokenValues_(file, line, code, tokstr, s));
+        values.remove_if([](const ValueFlow::Value& v) { return v.isTokValue(); });
+        return values.size() == 1U ? values.front() : ValueFlow::Value();
+    }
+
+    // getErrorPathForX: returns the error-path string attached to all values
+    // on the first "x" token at `linenr`.  Format per step: "linenr,msg\n".
+    // Enables regression testing of diagnostic reasoning chains.
+#define getErrorPathForX(...) getErrorPathForX_(__FILE__, __LINE__, __VA_ARGS__)
+    std::string getErrorPathForX_(const char* file, int line, const char code[], unsigned int linenr) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
+        for (const Token *tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            std::ostringstream ostr;
+            for (const ValueFlow::Value &v : tok->values()) {
+                for (const ErrorPathItem &ep : v.errorPath) {
+                    ostr << ep.first->linenr() << ',' << ep.second << '\n';
+                }
+            }
+            return ostr.str();
+        }
+        return "";
+    }
+
+    // __FILE__/__LINE__ delegating macros for value-checking helpers.
+    // When an assertion fails, the error pinpoints the call site in the test
+    // body rather than inside the helper implementation.
+
+    /// Requirement: x at linenr has a Known integer value equal to `value`.
+#define testValueOfXKnown(...) testValueOfXKnown_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXKnown_(const char* file, int line, const char code[], unsigned int linenr, int value) {
+        SimpleTokenizer tokenizer(settings, *this);
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -133,12 +230,11 @@ private:
         return false;
     }
 
-    /// Returns true when the first token named "x" at line `linenr` has a
-    /// Possible integer value equal to `value`.
-    bool testValueOfXPossible(const char code[], unsigned int linenr, int value) {
+    /// Requirement: x at linenr has a Possible integer value equal to `value`.
+#define testValueOfXPossible(...) testValueOfXPossible_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXPossible_(const char* file, int line, const char code[], unsigned int linenr, int value) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -151,12 +247,11 @@ private:
         return false;
     }
 
-    /// Returns true when the first token named "x" at line `linenr` has an
-    /// Impossible integer value equal to `value`.
-    bool testValueOfXImpossible(const char code[], unsigned int linenr, int value) {
+    /// Requirement: x at linenr has an Impossible integer value equal to `value`.
+#define testValueOfXImpossible(...) testValueOfXImpossible_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXImpossible_(const char* file, int line, const char code[], unsigned int linenr, int value) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -169,15 +264,32 @@ private:
         return false;
     }
 
-    /// Returns true when the first token named "x" at line `linenr` has a
-    /// UNINIT value (indicating the variable is uninitialized at that point).
-    ///
+    /// Requirement: x at linenr has an Inconclusive integer value equal to `value`.
+    /// Inconclusive differs from Possible: it means the analysis is unsure
+    /// whether the value is reachable, not just that multiple values exist.
+#define testValueOfXInconclusive(...) testValueOfXInconclusive_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXInconclusive_(const char* file, int line, const char code[], unsigned int linenr, int value) {
+        SimpleTokenizer tokenizer(settings, *this);
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [value](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.isInconclusive() && v.intvalue == value;
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    /// Requirement: x at linenr has a UNINIT value (uninitialized at that point).
     /// Phase U: CheckUninitVar reads UNINIT values placed on tokens by the
     /// analysis; this helper verifies that annotation is happening.
-    bool testValueOfXUninit(const char code[], unsigned int linenr) {
+#define testValueOfXUninit(...) testValueOfXUninit_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXUninit_(const char* file, int line, const char code[], unsigned int linenr) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -190,15 +302,12 @@ private:
         return false;
     }
 
-    /// Returns true when the first cast token '(' at line `linenr` has a
-    /// Known integer value equal to `value`.
-    ///
-    /// Phase Cast: used to verify that the cast expression token is annotated
-    /// with the evaluated value (not just the variable it is assigned to).
-    bool testCastKnown(const char code[], unsigned int linenr, int value) {
+    /// Requirement: the cast token '(' at linenr has a Known integer value
+    /// equal to `value`.  Phase Cast: verifies cast-expression token annotation.
+#define testCastKnown(...) testCastKnown_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testCastKnown_(const char* file, int line, const char code[], unsigned int linenr, int value) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "(" || !tok->isCast() || tok->linenr() != linenr)
                 continue;
@@ -211,16 +320,16 @@ private:
         return false;
     }
 
-    /// Returns true when the token named "x" at line `linenr` has NO integer
-    /// values at all (neither Known, Possible, nor Impossible).
-    bool testValueOfXNone(const char code[], unsigned int linenr) {
+    /// Requirement: x at linenr has NO integer values at all (neither Known,
+    /// Possible, nor Impossible).
+#define testValueOfXNone(...) testValueOfXNone_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXNone_(const char* file, int line, const char code[], unsigned int linenr) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
-            // If any integer value is present, the "none" test fails.
+            // If any integer value is present, the "none" assertion fails.
             if (std::any_of(tok->values().cbegin(), tok->values().cend(),
                             [](const ValueFlow::Value& v) { return v.isIntValue(); }))
                 return false;
@@ -545,6 +654,382 @@ private:
     }
 
     // -----------------------------------------------------------------------
+    // Phase R — Relational operator constraints (< > <= >=)
+    // -----------------------------------------------------------------------
+    //
+    // When a condition uses a relational operator, the analysis constrains x
+    // inside the true branch.  For "if (x > 5)" the minimum value of x in
+    // the then-block is 6; for "if (x < 5)" the maximum is 4.  These
+    // constraints are expressed as Possible values at the boundary.
+    //
+    // Requirement: false negatives are preferable to false positives — if the
+    // analysis cannot determine the exact constraint it must not emit a wrong
+    // Known value.
+    void relationalConstraints() {
+        // R1: "if (x > 5)" → inside the block x is possibly 6 (the minimum
+        //     value that satisfies x > 5 for integers).
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (x > 5) {\n"    // 2
+                                "    (void)x;\n"      // 3  ← x possibly 6
+                                "  }\n"               // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 6));
+        }
+
+        // R2: "if (x < 5)" → inside the block x is possibly 4 (the maximum
+        //     value that satisfies x < 5 for integers).
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (x < 5) {\n"    // 2
+                                "    (void)x;\n"      // 3  ← x possibly 4
+                                "  }\n"               // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 4));
+        }
+
+        // R3: "if (x >= 5)" → x is possibly 5 inside the block (exact lower bound).
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (x >= 5) {\n"   // 2
+                                "    (void)x;\n"      // 3  ← x possibly 5
+                                "  }\n"               // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 5));
+        }
+
+        // R4: "if (x <= 5)" → x is possibly 5 inside the block (exact upper bound).
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (x <= 5) {\n"   // 2
+                                "    (void)x;\n"      // 3  ← x possibly 5
+                                "  }\n"               // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 5));
+        }
+
+        // R5: reversed operands "if (5 < x)" is equivalent to "if (x > 5)".
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (5 < x) {\n"    // 2
+                                "    (void)x;\n"      // 3  ← x possibly 6
+                                "  }\n"               // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 6));
+        }
+
+        // R6: relational constraint does NOT produce a Known value — the
+        //     analysis must not infer x == 6 just because x > 5.
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  if (x > 5) {\n"    // 2
+                                "    (void)x;\n"      // 3  ← x must NOT be Known 6
+                                "  }\n"               // 4
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 6));
+        }
+
+        // R7: backward propagation of relational constraint.
+        //     Before "if (x > 5)" the variable x possibly satisfies x > 5.
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  (void)x;\n"        // 2  ← backward: x possibly 6
+                                "  if (x > 5) {}\n"  // 3
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 2, 6));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase OT — Operator token value annotation
+    // -----------------------------------------------------------------------
+    //
+    // Checkers such as checkZeroDivision and arrayIndex examine the value on
+    // the *operator token* itself (e.g. the "/" token) to decide whether a
+    // division by zero is happening.  DataFlow must annotate operator tokens
+    // with the computed value when both operands are known constants, not
+    // only the receiving variable.
+    //
+    // These tests use valueOfTok() which returns the single non-impossible,
+    // non-tok value on the first token matching a pattern — mirroring how
+    // testvalueflow.cpp tests arithmetic operator annotation.
+    void operatorTokenValues() {
+        // OT1: "3 + 4" — the "+" token must carry value 7.
+        {
+            const char code[] = "void f() { int x = 3 + 4; }";
+            TODO_ASSERT_EQUALS(7, 0, valueOfTok(code, "+").intvalue);
+        }
+
+        // OT2: "10 - 3" — the "-" token must carry value 7.
+        {
+            const char code[] = "void f() { int x = 10 - 3; }";
+            TODO_ASSERT_EQUALS(7, 0, valueOfTok(code, "-").intvalue);
+        }
+
+        // OT3: "3 * 4" — the "*" token must carry value 12.
+        {
+            const char code[] = "void f() { int x = 3 * 4; }";
+            TODO_ASSERT_EQUALS(12, 0, valueOfTok(code, "*").intvalue);
+        }
+
+        // OT4: "10 / 2" — the "/" token must carry value 5.
+        {
+            const char code[] = "void f() { int x = 10 / 2; }";
+            TODO_ASSERT_EQUALS(5, 0, valueOfTok(code, "/").intvalue);
+        }
+
+        // OT5: literal integer token must carry its own Known value.
+        //      tokenValues() on "42" must include a Known 42.
+        //      (This is already tested by literalAnnotation; here we confirm
+        //      the new tokenValues() primitive returns the right result.)
+        {
+            const char code[] = "void f() { return 42; }";
+            const auto vals = tokenValues(code, "42");
+            ASSERT(std::any_of(vals.begin(), vals.end(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.isKnown() && v.intvalue == 42;
+            }));
+        }
+
+        // OT6: zero literal in divisor position must carry Known 0 via tokenValues().
+        //      This mirrors the literalAnnotation test but exercises the new helper.
+        {
+            const char code[] = "int f(int x) { return x / 0; }";
+            const auto vals = tokenValues(code, "0");
+            ASSERT(std::any_of(vals.begin(), vals.end(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.isKnown() && v.intvalue == 0;
+            }));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase UI — Unsigned integer impossible-value constraints
+    // -----------------------------------------------------------------------
+    //
+    // An unsigned integer type (uint8_t, uint16_t, uint32_t, unsigned int)
+    // can never hold a negative value.  ValueFlow annotates such variables
+    // with an Impossible(-1) value (representing "< 0 is impossible") so
+    // that checkers can suppress spurious "x < 0 is always false" checks.
+    //
+    // Requirement: false negatives are preferable — if DataFlow cannot
+    // determine the type is unsigned it must not emit an incorrect constraint.
+    void unsignedImpossible() {
+        // UI1: uint32_t variable has Impossible(-1) — it can never be negative.
+        {
+            const char code[] = "#include <cstdint>\n"       // 1
+                                "void f(uint32_t x) {\n"     // 2
+                                "  (void)x;\n"               // 3  ← x is Impossible(-1)
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXImpossible(code, 3, -1));
+        }
+
+        // UI2: signed int does NOT get the Impossible(-1) constraint.
+        {
+            const char code[] = "void f(int x) {\n"          // 1
+                                "  (void)x;\n"               // 2  ← no Impossible(-1)
+                                "}\n";
+            ASSERT(!testValueOfXImpossible(code, 2, -1));
+        }
+
+        // UI3: unsigned int parameter also has Impossible(-1).
+        {
+            const char code[] = "void f(unsigned int x) {\n" // 1
+                                "  (void)x;\n"               // 2  ← x is Impossible(-1)
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXImpossible(code, 2, -1));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase SW — Switch/case value propagation
+    // -----------------------------------------------------------------------
+    //
+    // Inside a switch case block, the switched variable is Known equal to the
+    // case label value.  This is the same constraint that ValueFlow's
+    // valueFlowSwitchVariable applies.
+    //
+    // Requirement: the value is only Known inside the case block, not after
+    // the switch statement completes (where multiple cases may have executed).
+    void switchVariable() {
+        // SW1: inside "case 5:" the switched variable x is Known 5.
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  switch (x) {\n"    // 2
+                                "  case 5:\n"         // 3
+                                "    (void)x;\n"      // 4  ← x is Known (or Possible) 5
+                                "    break;\n"        // 5
+                                "  }\n"               // 6
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 4, 5));
+        }
+
+        // SW2: after the switch, x must NOT be Known 5 (other cases exist).
+        {
+            const char code[] = "void f(int x) {\n"        // 1
+                                "  switch (x) {\n"         // 2
+                                "  case 5: break;\n"       // 3
+                                "  case 10: break;\n"      // 4
+                                "  }\n"                    // 5
+                                "  (void)x;\n"             // 6  ← x is NOT Known 5
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 6, 5));
+        }
+
+        // SW3: default case does not constrain x to a specific value.
+        {
+            const char code[] = "void f(int x) {\n"   // 1
+                                "  switch (x) {\n"    // 2
+                                "  default:\n"        // 3
+                                "    (void)x;\n"      // 4  ← x has no specific Known value
+                                "    break;\n"        // 5
+                                "  }\n"               // 6
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase LB — For-loop variable bounds inside the loop body
+    // -----------------------------------------------------------------------
+    //
+    // For a simple counted loop "for (int x = 0; x < N; x++)" the analysis
+    // should recognize that inside the body x is in [0, N-1].  ValueFlow's
+    // valueFlowForLoop emits both the minimum (0) and the maximum (N-1) as
+    // Possible values on the loop variable token inside the body.
+    //
+    // Requirement: if N is a compile-time constant the bounds are exact; if N
+    // is unknown the analysis must not emit a false Known value.
+    void loopBounds() {
+        // LB1: loop variable x ranges over [0, 9] — both bounds are Possible
+        //      inside the body when the limit is a known literal.
+        {
+            const char code[] = "void f() {\n"                          // 1
+                                "  for (int x = 0; x < 10; x++) {\n"   // 2
+                                "    (void)x;\n"                        // 3  ← x possibly 0 and 9
+                                "  }\n"                                 // 4
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 0));
+            TODO_ASSERT_EQUALS(true, false, testValueOfXPossible(code, 3, 9));
+        }
+
+        // LB2: loop variable must NOT be Known 0 after the loop — it has
+        //      exited with value 10 (post-condition of the for loop).
+        {
+            const char code[] = "void f() {\n"                          // 1
+                                "  for (int x = 0; x < 10; x++) {}\n"  // 2
+                                "  (void)x;\n"                          // 3  ← x is NOT Known 0
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+        }
+
+        // LB3: loop with unknown limit — x must not be given a Known bound.
+        {
+            const char code[] = "void f(int n) {\n"                     // 1
+                                "  for (int x = 0; x < n; x++) {\n"    // 2
+                                "    (void)x;\n"                        // 3  ← x must NOT be Known 0
+                                "  }\n"                                 // 4
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase BW — Bitwise operation value annotation
+    // -----------------------------------------------------------------------
+    //
+    // DataFlow should fold constant bitwise expressions and annotate the
+    // result token.  Checkers use bitwise results for range narrowing
+    // (e.g. "x & 0xFF" is in [0, 255]).
+    //
+    // Requirement: for constant operands the Known value of the expression
+    // must be correct.  For non-constant operands no Known value is emitted.
+    void bitwiseOps() {
+        // BW1: bitwise AND of two constants → Known result.
+        {
+            const char code[] = "void f() {\n"            // 1
+                                "  int x = 0xFF & 0x0F;\n" // 2
+                                "  (void)x;\n"            // 3  ← x is 0x0F (15)
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, 0x0F));
+        }
+
+        // BW2: bitwise OR of two constants → Known result.
+        {
+            const char code[] = "void f() {\n"            // 1
+                                "  int x = 0xF0 | 0x0F;\n" // 2
+                                "  (void)x;\n"            // 3  ← x is 0xFF (255)
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, 0xFF));
+        }
+
+        // BW3: left shift of constant → Known result.
+        {
+            const char code[] = "void f() {\n"         // 1
+                                "  int x = 1 << 4;\n"  // 2
+                                "  (void)x;\n"         // 3  ← x is 16
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, 16));
+        }
+
+        // BW4: right shift of constant → Known result.
+        {
+            const char code[] = "void f() {\n"          // 1
+                                "  int x = 64 >> 2;\n"  // 2
+                                "  (void)x;\n"          // 3  ← x is 16
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, 16));
+        }
+
+        // BW5: bitwise AND with non-constant operand — no Known value.
+        {
+            const char code[] = "void f(int n) {\n"     // 1
+                                "  int x = n & 0xFF;\n" // 2
+                                "  (void)x;\n"          // 3  ← no Known value
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase TT — Type truncation on assignment
+    // -----------------------------------------------------------------------
+    //
+    // Assigning a value to a narrower type truncates the stored value.
+    // "unsigned char x = 0x123" stores 0x23 (low byte).
+    // "signed char x = 0xfe" stores -2 (sign-extension of 0xfe in 8 bits).
+    //
+    // Requirement: the truncated Known value must be emitted, not the
+    // pre-truncation value, to avoid false positives in range checks.
+    void typeTruncation() {
+        // TT1: unsigned char truncates to low 8 bits.
+        {
+            const char code[] = "void f() {\n"                 // 1
+                                "  unsigned char x = 0x123;\n" // 2
+                                "  (void)x;\n"                 // 3  ← x is 0x23 (35)
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, 0x23));
+        }
+
+        // TT2: signed char with value 0xfe is -2 after sign extension.
+        {
+            const char code[] = "void f() {\n"               // 1
+                                "  signed char x = 0xfe;\n"  // 2
+                                "  (void)x;\n"               // 3  ← x is -2
+                                "}\n";
+            TODO_ASSERT_EQUALS(true, false, testValueOfXKnown(code, 3, -2));
+        }
+
+        // TT3: int assigned from int literal that fits — no truncation, value
+        //      is exact.  This must continue to work after any truncation logic.
+        {
+            const char code[] = "void f() {\n"     // 1
+                                "  int x = 42;\n"  // 2
+                                "  (void)x;\n"     // 3  ← x is 42 (Known)
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 42));
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 6 — Complexity abort
     // -----------------------------------------------------------------------
     void complexityAbort() {
@@ -725,15 +1210,12 @@ private:
     // Additional helpers for new phases
     // -----------------------------------------------------------------------
 
-    /// Returns true when the first token named "x" at line `linenr` has a
-    /// Known float value approximately equal to `value` (within 1e-9).
-    ///
-    /// Phase F: float/double variables are annotated with FLOAT values;
-    /// this helper verifies the annotation.
-    bool testValueOfXFloat(const char code[], unsigned int linenr, double value) {
+    /// Requirement: x at linenr has a Known float value approximately equal
+    /// to `value` (within 1e-9).  Phase F float/double tracking.
+#define testValueOfXFloat(...) testValueOfXFloat_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfXFloat_(const char* file, int line, const char code[], unsigned int linenr, double value) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -747,17 +1229,14 @@ private:
         return false;
     }
 
-    /// Returns true when the first token named "x" at line `linenr` has
-    /// a Known CONTAINER_SIZE value equal to `size`, using `s` as settings
-    /// (so callers can pass settings with std.cfg loaded).
-    ///
-    /// Phase C: container variables are annotated with CONTAINER_SIZE values;
-    /// this helper verifies the annotation on the container variable token.
-    bool testContainerSizeKnown(const char code[], unsigned int linenr, int size,
-                                const Settings& s) {
+    /// Requirement: x at linenr has a Known CONTAINER_SIZE value equal to
+    /// `size`, using settings `s` which must have std.cfg loaded.
+    /// Phase C: container variables are annotated with CONTAINER_SIZE values.
+#define testContainerSizeKnown(...) testContainerSizeKnown_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testContainerSizeKnown_(const char* file, int line, const char code[], unsigned int linenr, int size,
+                                 const Settings& s) {
         SimpleTokenizer tokenizer(s, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != "x" || tok->linenr() != linenr)
                 continue;
@@ -1113,14 +1592,14 @@ private:
     // Literal constant annotation
     // -----------------------------------------------------------------------
 
-    /// Returns true when the first token with string `tokstr` at line `linenr`
-    /// has a Known integer value equal to `value`.
-    /// Requirement: DataFlow must annotate integer literals with their Known value
-    /// so that checkers (checkZeroDivision, arrayIndex) can find them via getValue().
-    bool testValueOfTokenKnown(const char code[], unsigned int linenr, const char* tokstr, MathLib::bigint value) {
+    /// Requirement: the token with string `tokstr` at line `linenr` has a
+    /// Known integer value equal to `value`.  DataFlow must annotate integer
+    /// literals so that checkers (checkZeroDivision, arrayIndex) can find
+    /// them via getValue() at normal check level.
+#define testValueOfTokenKnown(...) testValueOfTokenKnown_(__FILE__, __LINE__, __VA_ARGS__)
+    bool testValueOfTokenKnown_(const char* file, int line, const char code[], unsigned int linenr, const char* tokstr, MathLib::bigint value) {
         SimpleTokenizer tokenizer(settings, *this);
-        if (!tokenizer.tokenize(code))
-            return false;
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
         for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
             if (tok->str() != tokstr || tok->linenr() != linenr)
                 continue;
@@ -1154,14 +1633,118 @@ private:
     }
 
     // -----------------------------------------------------------------------
+    // Robustness: no crash or hang on pathological inputs
+    // -----------------------------------------------------------------------
+    //
+    // These tests simply run the analysis on tricky or degenerate inputs and
+    // verify that no crash, assertion failure, or infinite loop occurs.  They
+    // do not assert specific values — only that the analysis terminates.
+    //
+    // Requirement: the analysis must never crash regardless of input complexity.
+    void nocrash() {
+        // NC1: empty function body — nothing to analyze.
+        { const char code[] = "void f() {}"; ASSERT(testValueOfXNone(code, 1)); }
+
+        // NC2: function with no local variables — must not crash on empty state.
+        {
+            const char code[] = "void f(int a, int b) {\n"
+                                "  return;\n"
+                                "}\n";
+            ASSERT(testValueOfXNone(code, 2));
+        }
+
+        // NC3: deeply nested ternary expressions — must terminate.
+        {
+            const char code[] = "int f(int a,int b,int c,int d) {\n"
+                                "  int x = a?b?c?d?1:2:3:4:5;\n"
+                                "  return x;\n"
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0)); // only check no-crash; value irrelevant
+        }
+
+        // NC4: loop with complex condition — must terminate without hang.
+        {
+            const char code[] = "void f(int n) {\n"
+                                "  int x = 0;\n"
+                                "  while (n-- > 0 && x < 100) { x++; }\n"
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 0)); // no-crash check
+        }
+
+        // NC5: variable used only in sizeof — must not crash.
+        //      sizeof does not evaluate its argument, so x at line 3 may not
+        //      get a value annotation; we only verify the analysis terminates.
+        {
+            const char code[] = "void f() {\n"            // 1
+                                "  int x = 5;\n"          // 2
+                                "  (void)sizeof(x);\n"   // 3
+                                "}\n";
+            // No crash check: tokenize must succeed and analysis must not hang.
+            ASSERT(!testValueOfXKnown(code, 3, 999)); // x is not 999; no crash
+        }
+
+        // NC6: goto forward — must not crash or loop.
+        {
+            const char code[] = "void f(int x) {\n"
+                                "  if (x) goto end;\n"
+                                "  x = 1;\n"
+                                "  end: (void)x;\n"
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 0)); // no-crash check
+        }
+
+        // NC7: multiple return paths — must not crash on merge.
+        {
+            const char code[] = "int f(int a, int b) {\n"
+                                "  int x;\n"
+                                "  if (a) { x = 1; return x; }\n"
+                                "  if (b) { x = 2; return x; }\n"
+                                "  x = 3;\n"
+                                "  return x;\n"
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 6, 3));
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // False-positive regression tests
     // -----------------------------------------------------------------------
-    // Each test here corresponds to a bug report where a previous analysis
-    // produced a false positive.  The new DataFlow analysis must NOT reproduce
-    // these false positives.  New entries are added as trac tickets are resolved.
+    // Each test here corresponds to a real false positive that was reported
+    // against the DataFlow analysis.  The analysis must NOT reproduce these.
+    // Format: comment with ticket/issue reference, then the ASSERT.
     void falsePositiveRegression() {
-        // Placeholder: no tickets resolved yet.
-        // Add entries here as: ASSERT(!testValueOfXKnown(code, linenr, value));
+        // FP1: re-assignment to an unknown value must clear the Known state.
+        //      Without this, "x = y" after "x = 5" would leave x as Known 5.
+        {
+            const char code[] = "void f(int y) {\n"
+                                "  int x = 5;\n"
+                                "  x = y;\n"
+                                "  (void)x;\n"  // x is NOT Known 5 after x=y
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 5));
+        }
+
+        // FP2: variable modified in a loop body must not remain Known after
+        //      the loop — the loop may execute zero or more times.
+        {
+            const char code[] = "void f(int c) {\n"
+                                "  int x = 5;\n"
+                                "  while (c) { x = 10; }\n"
+                                "  (void)x;\n"  // x must NOT be Known 5 after the loop
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 4, 5));
+        }
+
+        // FP3: variable used before any assignment is UNINIT, not Known 0.
+        //      The analysis must not default-initialize local variables.
+        {
+            const char code[] = "void f() {\n"
+                                "  int x;\n"
+                                "  (void)x;\n"  // x is UNINIT, NOT Known 0
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+            ASSERT(testValueOfXUninit(code, 3));
+        }
     }
 };
 
