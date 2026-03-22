@@ -1116,7 +1116,46 @@ static void dropWrittenVars(const Token* start, const Token* end, DFContext& ctx
 
 
 // ===========================================================================
-// 9b. collectWhileExitConstraints (Phase NW)
+// 9b. hasTopLevelAssignment (Phase NW3)
+// ===========================================================================
+
+/// Returns true when varId has an assignment at depth 0 inside [start, end),
+/// i.e. directly in the loop body and not inside any nested {} block.
+///
+/// Requirement: distinguish unconditional assignments (x = … at loop top
+/// level) from conditional ones (x = … inside an if block).  Only variables
+/// with purely conditional assignments can be possibly-uninit after the loop,
+/// because an unconditional assignment guarantees x is written if the loop
+/// body executes even once.
+///
+/// increment/decrement (++ / --) count as top-level assignments too.
+static bool hasTopLevelAssignment(nonneg int varId,
+                                  const Token* start, const Token* end) {
+    int depth = 0;
+    for (const Token* t = start; t && t != end; t = t->next()) {
+        if (t->str() == "{") {
+            ++depth;
+        } else if (t->str() == "}") {
+            --depth;
+        } else if (depth == 0) {
+            // Direct assignment at top level: "x = …", "x += …", etc.
+            if (t->isAssignmentOp()) {
+                const Token* lhs = t->astOperand1();
+                if (lhs && lhs->varId() == varId)
+                    return true;
+            }
+            // Increment / decrement at top level: "x++" / "++x"
+            if ((t->str() == "++" || t->str() == "--") &&
+                t->astOperand1() && t->astOperand1()->varId() == varId)
+                return true;
+        }
+    }
+    return false;
+}
+
+
+// ===========================================================================
+// 9c. collectWhileExitConstraints (Phase NW)
 // ===========================================================================
 
 /// Phase NW: Inject Possible null (0) values for pointer null-guards found in
@@ -1417,6 +1456,35 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         } else if (condRoot->str() == "&&") {
                             // AND-chain: each null-guard pointer is Possible null.
                             collectWhileExitConstraints(condRoot, ctx.state);
+                        }
+
+                        // Phase NW3: re-inject UNINIT(Possible) for variables
+                        // that were declared without an initializer (ctx.uninits),
+                        // erased from state by dropWrittenVars, and whose only
+                        // assignments inside the loop body are conditional
+                        // (i.e. inside nested {} blocks, never at the top level).
+                        //
+                        // Requirement: only variables with purely conditional
+                        // loop assignments can be possibly-uninit after the loop.
+                        // A top-level (unconditional) assignment guarantees the
+                        // variable is written whenever the loop body runs, so
+                        // reporting it would be a false positive.
+                        //
+                        // condRoot is stored in value.condition so that the
+                        // error message can reference the loop condition as the
+                        // reason for the possible uninit.
+                        for (const nonneg int varId : ctx.uninits) {
+                            if (ctx.state.find(varId) != ctx.state.end())
+                                continue;  // still has a value — not erased
+                            if (hasTopLevelAssignment(varId,
+                                                      bodyOpen->next(),
+                                                      bodyClose))
+                                continue;  // unconditional assignment in loop — no FP
+                            ValueFlow::Value u;
+                            u.valueType = ValueFlow::Value::ValueType::UNINIT;
+                            u.setPossible();
+                            u.condition = condRoot;
+                            ctx.state[varId] = {u};
                         }
                     }
                 }

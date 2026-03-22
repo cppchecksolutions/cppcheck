@@ -1254,6 +1254,26 @@ private:
                                 "}\n";
             ASSERT(testValueOfXUninit(code, 4));
         }
+
+        // U7: variable assigned only inside a conditional branch within a while
+        //     loop — possibly uninit after the loop because even when the loop
+        //     runs, the branch may never be taken.
+        //     Phase NW3 must re-inject UNINIT(Possible) for variables in
+        //     ctx.uninits that have only conditional (non-top-level) assignments
+        //     inside the loop body.
+        {
+            const char code[] = "void f(int c) {\n"         // 1
+                                "  int x;\n"                 // 2  ← declared without init
+                                "  while (c) {\n"            // 3
+                                "    if (c > 5) {\n"         // 4  ← conditional block
+                                "      x = c;\n"             // 5  ← only assignment, conditional
+                                "    }\n"                    // 6
+                                "    c = 0;\n"               // 7
+                                "  }\n"                      // 8
+                                "  (void)x;\n"               // 9  ← x is possibly UNINIT here
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 9));
+        }
     }
 
     // -----------------------------------------------------------------------
