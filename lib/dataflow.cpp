@@ -139,6 +139,12 @@
 
 namespace {
 
+// Returns true if the floating-point value is exactly zero (positive or negative).
+// Used instead of direct == 0.0 comparison to avoid -Wfloat-equal warnings.
+static bool isFloatZero(double v) {
+    return std::fpclassify(v) == FP_ZERO;
+}
+
 // ===========================================================================
 // 1. Core types
 // ===========================================================================
@@ -569,7 +575,7 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
             result.floatValue = lhs.floatValue - rhs.floatValue;
         else if (op == "*")
             result.floatValue = lhs.floatValue * rhs.floatValue;
-        else if (op == "/" && rhs.floatValue != 0.0)
+        else if (op == "/" && !isFloatZero(rhs.floatValue))
             result.floatValue = lhs.floatValue / rhs.floatValue;
         else
             return false;  // division by zero or unsupported operator
@@ -717,7 +723,9 @@ static void annotateContainerTok(Token* tok, const DFContext& ctx) {
 static DFState mergeStates(const DFState& s1, const DFState& s2) {
     DFState result;
 
-    for (const auto& [varId, vals1] : s1) {
+    for (const auto& kv1 : s1) {
+        const nonneg int varId = kv1.first;
+        const DFValues& vals1 = kv1.second;
         const auto it2 = s2.find(varId);
         if (it2 == s2.end())
             continue;  // only in s1 → drop (conservative)
@@ -763,7 +771,9 @@ static DFMemberState mergeMemberStates(const DFMemberState& s1,
                                        const DFMemberState& s2) {
     DFMemberState result;
 
-    for (const auto& [key, vals1] : s1) {
+    for (const auto& kv1 : s1) {
+        const DFMemberKey& key = kv1.first;
+        const DFValues& vals1 = kv1.second;
         const auto it2 = s2.find(key);
         if (it2 == s2.end())
             continue;
@@ -1432,7 +1442,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                  argTok = argTok->next()) {
                 if (argTok->str() == "(") {
                     if (argTok->link())
-                        argTok = const_cast<Token*>(argTok->link());
+                        argTok = argTok->link();
                     continue;
                 }
                 if (argTok->varId() > 0 && argTok->isName()) {
@@ -1461,7 +1471,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             }
 
             if (tok->link())
-                tok = const_cast<Token*>(tok->link());
+                tok = tok->link();
             continue;
         }
 
@@ -1580,7 +1590,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 lv.floatValue -= rhs.floatValue;
                             else if (op == "*=")
                                 lv.floatValue *= rhs.floatValue;
-                            else if (op == "/=" && rhs.floatValue != 0.0)
+                            else if (op == "/=" && !isFloatZero(rhs.floatValue))
                                 lv.floatValue /= rhs.floatValue;
                             else {
                                 ctx.state.erase(varId);
@@ -1789,7 +1799,9 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
                             // dummy member state is created locally and discarded.
                             DFMemberState dummyMembers;
                             applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
-                            for (auto& [varId, vals] : tmp) {
+                            for (auto& kv : tmp) {
+                                const nonneg int varId = kv.first;
+                                DFValues& vals = kv.second;
                                 // Known values become Possible (we don't know if the
                                 // branch was always taken).  Impossible values stay
                                 // Impossible — their semantics are preserved going backward.
@@ -1849,7 +1861,9 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
             // dummy member state is created locally and discarded.
             DFMemberState dummyMembers;
             applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
-            for (auto& [varId, vals] : tmp) {
+            for (auto& kv : tmp) {
+                const nonneg int varId = kv.first;
+                DFValues& vals = kv.second;
                 // Known → Possible (branch may not always execute).
                 // Impossible stays Impossible (its meaning is preserved backward).
                 for (ValueFlow::Value& v : vals)
