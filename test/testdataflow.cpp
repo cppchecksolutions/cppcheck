@@ -123,6 +123,13 @@ private:
         // Phase M — Struct/class member field tracking
         TEST_CASE(memberFieldPropagation);
 
+        // Phase M2 — Member-access expression carries the field value
+        // (the '.' token must be annotated so division-by-zero checkers find it)
+        TEST_CASE(memberFieldDivisionByZero);
+
+        // Phase MN — Struct member pointer null condition constraints
+        TEST_CASE(memberPtrCondition);
+
         // Phase C — Container size tracking
         TEST_CASE(containerSize);
 
@@ -1468,6 +1475,125 @@ private:
                                 "  (void)obj.x;\n"         // 5  ← x is 7 (Known)
                                 "}\n";
             ASSERT(testValueOfXKnown(code, 5, 7));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase M2 — Member-access expression ('.') carries the field value
+    // -----------------------------------------------------------------------
+    //
+    // Requirement: when "obj.field" is read as the divisor in "x / obj.field",
+    // the '.' token (which is astOperand2 of the '/' operator) must carry the
+    // known value of the field so that CheckOther::checkZeroDivision can find
+    // it via tok->astOperand2()->getValue(0LL).
+    //
+    // annotateMemberTok now propagates the field value onto both the field
+    // token ('x') AND the parent '.' token so that all existing checkers
+    // that inspect the expression token work without modification.
+    void memberFieldDivisionByZero() {
+        // M2.1: '.' token carries Known(0) when s.x = 0 was assigned.
+        //       This is the value that checkZeroDivision inspects.
+        //
+        //       In "s.x = 0; int a = 100 / s.x;", the token stream has two
+        //       '.' tokens.  The read-site '.' in "100 / s.x" is followed by
+        //       "x ;" in the stream, while the write-site '.' in "s.x = 0" is
+        //       followed by "x =".  Pattern ". x ;" selects the read-site '.'.
+        {
+            const char code[] = "struct S { int x; int y; };\n"  // 1
+                                "void f() {\n"                    // 2
+                                "  struct S s;\n"                 // 3
+                                "  s.x = 0;\n"                   // 4
+                                "  int a = 100 / s.x;\n"         // 5  ← '.' must carry 0
+                                "}\n";
+            // ". x ;" finds the '.' in the read expression on line 5.
+            const auto vals = tokenValues(code, ". x ;");
+            ASSERT_EQUALS(1U, vals.size());
+            ASSERT_EQUALS(0LL, vals.front().intvalue);
+            ASSERT(vals.front().isKnown());
+        }
+
+        // M2.2: non-zero member value does NOT produce a false zerodiv warning.
+        {
+            const char code[] = "struct S { int x; };\n"   // 1
+                                "void f() {\n"              // 2
+                                "  struct S s;\n"           // 3
+                                "  s.x = 5;\n"              // 4
+                                "  int a = 100 / s.x;\n"   // 5  ← '.' must carry 5
+                                "}\n";
+            const auto vals = tokenValues(code, ". x ;");
+            ASSERT_EQUALS(1U, vals.size());
+            ASSERT_EQUALS(5LL, vals.front().intvalue);
+            ASSERT(vals.front().isKnown());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase MN — Struct member pointer null condition propagation
+    // -----------------------------------------------------------------------
+    //
+    // Requirement: when a condition "if (!s.x)" or "if (s.x == nullptr)" is
+    // processed, the member pointer field s.x must be constrained in the
+    // then/else branches.  After an empty if (!s.x) {} body, the merge must
+    // produce a Possible(0) value on s.x at the dereference site, enabling
+    // CheckNullPointer to detect the potential null dereference.
+    //
+    // False negatives are preferred over false positives: only simple,
+    // recognisable condition forms are handled.
+    void memberPtrCondition() {
+        // MN1: "if (!s.x) {}" — empty then-block, no else.
+        //      Then-path: s.x = Known(0).  Else-path: s.x = Impossible(0).
+        //      After merge both paths reach dereference → Possible(0).
+        {
+            const char code[] = "struct S { int *x; int y; };\n"  // 1
+                                "void foo(struct S s) {\n"         // 2
+                                "  if (!s.x) {}\n"                 // 3
+                                "  *s.x;\n"                        // 4  ← x is Possible 0
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 4, 0));
+        }
+
+        // MN2: "if (!s.x) { return; }" — then-block terminates.
+        //      Only the else-path (s.x != null → Impossible 0) reaches the
+        //      dereference, so x must carry Impossible(0) after the if.
+        {
+            const char code[] = "struct S { int *x; };\n"         // 1
+                                "void foo(struct S s) {\n"         // 2
+                                "  if (!s.x) { return; }\n"       // 3
+                                "  *s.x;\n"                        // 4  ← x is Impossible 0
+                                "}\n";
+            ASSERT(testValueOfXImpossible(code, 4, 0));
+        }
+
+        // MN3: "if (s.x == nullptr) {}" — equality form, same effect as MN1.
+        {
+            const char code[] = "struct S { int *x; };\n"         // 1
+                                "void foo(struct S s) {\n"         // 2
+                                "  if (s.x == nullptr) {}\n"      // 3
+                                "  *s.x;\n"                        // 4  ← x is Possible 0
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 4, 0));
+        }
+
+        // MN4: "if (s.x)" — direct truth-value, non-null on then-path.
+        //      Then-path: s.x = Impossible(0). Else-path: s.x = Known(0).
+        //      After merge: Possible(0) at the dereference.
+        {
+            const char code[] = "struct S { int *x; };\n"         // 1
+                                "void foo(struct S s) {\n"         // 2
+                                "  if (s.x) {}\n"                  // 3
+                                "  *s.x;\n"                        // 4  ← x is Possible 0
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 4, 0));
+        }
+
+        // MN5: false-positive guard — no condition means no null value injected.
+        {
+            const char code[] = "struct S { int *x; };\n"         // 1
+                                "void foo(struct S s) {\n"         // 2
+                                "  *s.x;\n"                        // 3  ← no null value
+                                "}\n";
+            ASSERT(!testValueOfXPossible(code, 3, 0));
+            ASSERT(!testValueOfXKnown(code, 3, 0));
         }
     }
 

@@ -257,6 +257,35 @@ static bool isTrackedPtrVar(const Token* tok) {
     return vt && vt->pointer > 0;
 }
 
+/// Returns true when tok is a '.' AST node representing a member pointer
+/// field access that the analysis should track for null conditions.
+///
+/// Requirements:
+///  - tok is the '.' AST operator node (member-access expression)
+///  - astOperand1() (the object) has a non-zero varId
+///  - astOperand2() (the field) has a non-zero varId
+///  - the field's variable type is a raw pointer (pointer > 0)
+///
+/// Phase MN: used by applyConditionConstraint to recognise conditions of the
+/// form "!s.x", "if(s.x)", "s.x == nullptr", "s.x != nullptr" where s.x is
+/// a pointer-typed struct/class member field.
+static bool isMemberPtrAccess(const Token* tok) {
+    if (!tok || tok->str() != ".")
+        return false;
+    const Token* objTok   = tok->astOperand1();
+    const Token* fieldTok = tok->astOperand2();
+    if (!objTok || objTok->varId() == 0)
+        return false;
+    if (!fieldTok || fieldTok->varId() == 0)
+        return false;
+    const Variable* fieldVar = fieldTok->variable();
+    if (!fieldVar)
+        return false;
+    const ValueType* vt = fieldVar->valueType();
+    // Only track simple pointer fields (pointer > 0), not arrays or function pointers.
+    return vt && vt->pointer > 0;
+}
+
 /// Returns true when tok refers to a floating-point scalar variable.
 ///
 /// Phase F: track float/double/long double non-pointer variables so that
@@ -628,6 +657,14 @@ static void annotateMemberTok(Token* tok, const DFContext& ctx) {
 
     for (const ValueFlow::Value& val : it->second)
         tok->addValue(val);
+
+    // Requirement: the '.' member-access expression token must carry the same
+    // value as the field token so that checkers inspecting astOperand2() of an
+    // operator (e.g. checkZeroDivision looks at tok->astOperand2()->getValue(0))
+    // find the value without needing special handling for member-access nodes.
+    Token* dotTok = const_cast<Token*>(parent);
+    for (const ValueFlow::Value& val : it->second)
+        dotTok->addValue(val);
 }
 
 /// Phase C: annotate a container variable token with the current known
@@ -830,34 +867,68 @@ static bool blockTerminates(const Token* start, const Token* end) {
 ///
 /// `condRoot` is the AST root of the condition expression, typically obtained
 /// as  parenToken->astOperand2()  for  "if ( condition )".
+/// Update `state` and `members` to reflect what is known when a condition
+/// evaluates to branchTaken (true = then-path, false = else-path).
+///
+/// Handles:
+///   Phase N  — simple pointer variables: !p, if(p), p==nullptr, p!=nullptr
+///   Phase MN — member pointer fields:    !s.x, if(s.x), s.x==nullptr, s.x!=nullptr
+///
+/// All other condition forms are ignored (requirement 4 — no FP: when in
+/// doubt, do nothing).
+///
+/// `members` is updated for member pointer conditions; `state` is updated for
+/// simple variable conditions.  Either may remain unchanged if the condition
+/// does not match a recognised pattern.
 static void applyConditionConstraint(const Token* condRoot,
                                      DFState& state,
+                                     DFMemberState& members,
                                      bool branchTaken) {
     if (!condRoot)
         return;
 
     // -----------------------------------------------------------------
-    // Phase N: pointer-specific conditions
+    // Phase N / Phase MN: negation patterns  "!p"  and  "!s.x"
     // -----------------------------------------------------------------
 
-    // Pattern: !p
-    //   branchTaken=true  (if (!p))  → p IS null  (Known 0)
-    //   branchTaken=false (else)      → p is NOT null (Impossible 0)
+    // Pattern: !p  or  !s.x
+    //   branchTaken=true  (if (!…))  → operand IS null  (Known 0)
+    //   branchTaken=false (else)      → operand is NOT null (Impossible 0)
     if (condRoot->str() == "!" && condRoot->astOperand1() &&
         !condRoot->astOperand2()) {
-        const Token* varTok = condRoot->astOperand1();
-        if (isTrackedPtrVar(varTok)) {
+        const Token* operand = condRoot->astOperand1();
+
+        // Phase N: simple pointer variable
+        if (isTrackedPtrVar(operand)) {
             ValueFlow::Value nullVal(0LL);
             if (branchTaken)
                 nullVal.setKnown();
             else
                 nullVal.setImpossible();
-            state[varTok->varId()] = {nullVal};
+            state[operand->varId()] = {nullVal};
         }
+
+        // Phase MN: member pointer field "!s.x"
+        // Requirement: update the member state, not the main DFState.
+        else if (isMemberPtrAccess(operand)) {
+            const nonneg int objId   = operand->astOperand1()->varId();
+            const nonneg int fieldId = operand->astOperand2()->varId();
+            ValueFlow::Value nullVal(0LL);
+            if (branchTaken)
+                nullVal.setKnown();
+            else
+                nullVal.setImpossible();
+            members[{objId, fieldId}] = {nullVal};
+        }
+
         return;
     }
 
-    // Pattern: if (p)  — pointer variable used directly as a condition
+    // -----------------------------------------------------------------
+    // Phase N / Phase MN: direct truth-value  "if (p)"  and  "if (s.x)"
+    // -----------------------------------------------------------------
+
+    // Pattern: if (p)  — simple pointer as condition
     //   branchTaken=true  → p is NOT null (Impossible 0)
     //   branchTaken=false → p IS null     (Known 0)
     if (isTrackedPtrVar(condRoot)) {
@@ -870,9 +941,24 @@ static void applyConditionConstraint(const Token* condRoot,
         return;
     }
 
+    // Phase MN: if (s.x)  — member pointer field as condition
+    // Requirement: same semantics as "if (p)" but stored in members.
+    if (isMemberPtrAccess(condRoot)) {
+        const nonneg int objId   = condRoot->astOperand1()->varId();
+        const nonneg int fieldId = condRoot->astOperand2()->varId();
+        ValueFlow::Value nullVal(0LL);
+        if (branchTaken)
+            nullVal.setImpossible();
+        else
+            nullVal.setKnown();
+        members[{objId, fieldId}] = {nullVal};
+        return;
+    }
+
     // -----------------------------------------------------------------
     // Equality / inequality: "x == const", "x != const",
-    //                        "p == nullptr", "p != nullptr"
+    //                        "p == nullptr", "p != nullptr",
+    //                        "s.x == nullptr", "s.x != nullptr"
     // -----------------------------------------------------------------
     const bool isEq = (condRoot->str() == "==");
     const bool isNe = (condRoot->str() == "!=");
@@ -884,47 +970,82 @@ static void applyConditionConstraint(const Token* condRoot,
     if (!op1 || !op2)
         return;
 
-    // Identify which side is the variable and which side is the constant.
-    // Extended to handle pointer variables alongside integer variables.
-    const Token* varTok = nullptr;
+    // Identify which side is the variable/member and which side is the constant.
+    // Handles simple integer/pointer vars and member pointer field accesses.
+    const Token* varTok    = nullptr;  // simple variable side (Phase N / integer)
+    const Token* memberTok = nullptr;  // member access side   (Phase MN)
     ValueFlow::Value constVal(0LL);
     constVal.setKnown();
 
     // Use an empty temporary state to evaluate the constant side.
-    // This ensures we don't accidentally use uncertain variable values.
+    // This avoids accidentally using uncertain variable values.
     const DFState emptyState;
 
     const bool op1tracked = isTrackedVar(op1) || isTrackedPtrVar(op1);
     const bool op2tracked = isTrackedVar(op2) || isTrackedPtrVar(op2);
+    const bool op1member  = isMemberPtrAccess(op1);
+    const bool op2member  = isMemberPtrAccess(op2);
 
     if (op1tracked && evalConstInt(op2, emptyState, constVal)) {
         varTok = op1;
     } else if (op2tracked && evalConstInt(op1, emptyState, constVal)) {
         varTok = op2;
+    } else if (op1member && evalConstInt(op2, emptyState, constVal)) {
+        // Phase MN: "s.x == nullptr"  or  "s.x == 0"
+        memberTok = op1;
+    } else if (op2member && evalConstInt(op1, emptyState, constVal)) {
+        // Phase MN: "nullptr == s.x"  or  "0 == s.x"
+        memberTok = op2;
     } else {
-        return;  // not a simple var==const pattern — do nothing
+        return;  // not a recognised pattern — do nothing
     }
 
-    if (isEq) {
-        if (branchTaken) {
-            // if (x == val) { … }  →  inside the then-block: x is Known val
-            constVal.setKnown();
-            state[varTok->varId()] = {constVal};
+    if (varTok) {
+        // Simple variable constraint (existing Phase N / integer logic).
+        if (isEq) {
+            if (branchTaken) {
+                // if (x == val) { … }  →  then-block: x is Known val
+                constVal.setKnown();
+                state[varTok->varId()] = {constVal};
+            } else {
+                // else-path: x is NOT val
+                constVal.setImpossible();
+                state[varTok->varId()] = {constVal};
+            }
         } else {
-            // if (x == val) { … } else { … }  →  else-path: x is NOT val
-            constVal.setImpossible();
-            state[varTok->varId()] = {constVal};
+            // !=
+            if (branchTaken) {
+                // if (x != val) { … }  →  then-path: x is NOT val
+                constVal.setImpossible();
+                state[varTok->varId()] = {constVal};
+            } else {
+                // else-path: x IS val
+                constVal.setKnown();
+                state[varTok->varId()] = {constVal};
+            }
         }
     } else {
-        // !=
-        if (branchTaken) {
-            // if (x != val) { … }  →  then-path: x is NOT val
-            constVal.setImpossible();
-            state[varTok->varId()] = {constVal};
+        // Phase MN: member pointer field constraint "s.x == 0" / "s.x != 0".
+        // Requirement: update members keyed by (objId, fieldId), not state.
+        const nonneg int objId   = memberTok->astOperand1()->varId();
+        const nonneg int fieldId = memberTok->astOperand2()->varId();
+        if (isEq) {
+            if (branchTaken) {
+                constVal.setKnown();
+                members[{objId, fieldId}] = {constVal};
+            } else {
+                constVal.setImpossible();
+                members[{objId, fieldId}] = {constVal};
+            }
         } else {
-            // if (x != val) { … } else { … }  →  else-path: x IS val
-            constVal.setKnown();
-            state[varTok->varId()] = {constVal};
+            // !=
+            if (branchTaken) {
+                constVal.setImpossible();
+                members[{objId, fieldId}] = {constVal};
+            } else {
+                constVal.setKnown();
+                members[{objId, fieldId}] = {constVal};
+            }
         }
     }
 }
@@ -1112,8 +1233,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Apply the if-condition constraint inside the then-block.
             // condRoot is the AST root of the condition expression.
             const Token* condRoot = parenOpen->astOperand2();
-            applyConditionConstraint(condRoot, ctxThen.state, /*branchTaken=*/true);
-            applyConditionConstraint(condRoot, ctxElse.state, /*branchTaken=*/false);
+            // Phase MN: also pass member state so member pointer conditions are handled.
+            applyConditionConstraint(condRoot, ctxThen.state, ctxThen.members, /*branchTaken=*/true);
+            applyConditionConstraint(condRoot, ctxElse.state, ctxElse.members, /*branchTaken=*/false);
 
             // Analyse the then-block.
             forwardAnalyzeBlock(const_cast<Token*>(thenOpen->next()), thenClose,
@@ -1663,7 +1785,10 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
                         const Token* condRoot = condOpen->astOperand2();
                         if (condRoot) {
                             DFState tmp;
-                            applyConditionConstraint(condRoot, tmp, /*branchTaken=*/true);
+                            // Phase MN: backward pass does not track member null state;
+                            // dummy member state is created locally and discarded.
+                            DFMemberState dummyMembers;
+                            applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
                             for (auto& [varId, vals] : tmp) {
                                 // Known values become Possible (we don't know if the
                                 // branch was always taken).  Impossible values stay
@@ -1720,7 +1845,10 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
                 continue;
 
             DFState tmp;
-            applyConditionConstraint(condRoot, tmp, /*branchTaken=*/true);
+            // Phase MN: backward pass does not track member null state;
+            // dummy member state is created locally and discarded.
+            DFMemberState dummyMembers;
+            applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
             for (auto& [varId, vals] : tmp) {
                 // Known → Possible (branch may not always execute).
                 // Impossible stays Impossible (its meaning is preserved backward).
