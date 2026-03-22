@@ -584,6 +584,34 @@ private:
                                 "}\n";
             ASSERT(testValueOfXKnown(code, 4, 5));
         }
+
+        // Task NW1: while loop with null-guard && condition.
+        // After "while (x && x->n > 0)", x might be null at the loop exit
+        // (the loop can exit because x became null OR because x->n <= 0).
+        // Requirement: x must carry a Possible null (0) value at line 6.
+        {
+            const char code[] = "struct S { int n; struct S *next; };\n"  // 1
+                                "int foo(struct S *x) {\n"                // 2
+                                "   while (x && x->n > 0) {\n"           // 3
+                                "       x = x->next;\n"                   // 4
+                                "   }\n"                                   // 5
+                                "   (void)x;\n"                            // 6
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 6, 0));
+        }
+
+        // Task NW2: simple while (x) → after the loop, x is Known null.
+        // Requirement: x must carry a Known null (0) value at line 6.
+        {
+            const char code[] = "struct S { struct S *next; };\n"  // 1
+                                "void foo(struct S *x) {\n"        // 2
+                                "   while (x) {\n"                 // 3
+                                "       x = x->next;\n"            // 4
+                                "   }\n"                           // 5
+                                "   (void)x;\n"                    // 6
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 6, 0));
+        }
     }
 
     // -----------------------------------------------------------------------

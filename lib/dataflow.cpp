@@ -1116,6 +1116,62 @@ static void dropWrittenVars(const Token* start, const Token* end, DFContext& ctx
 
 
 // ===========================================================================
+// 9b. collectWhileExitConstraints (Phase NW)
+// ===========================================================================
+
+/// Phase NW: Inject Possible null (0) values for pointer null-guards found in
+/// a while-loop condition, to reflect what is known when the loop exits.
+///
+/// After "while (p && rest) { ... }", we know the condition was false on exit,
+/// but cannot determine which clause caused the failure.  Therefore each
+/// tracked pointer that appears as a direct truth-test leaf in an && chain
+/// is marked as Possible null (not Known null).
+///
+/// For the simple "while (p)" case (no && chain), the caller should instead
+/// call applyConditionConstraint with branchTaken=false, which produces the
+/// stronger Known null result.
+///
+/// Only direct pointer truth-tests are handled.  Negation (!p) and other
+/// compound forms are skipped (requirement 4 — no FP).
+static void collectWhileExitConstraints(const Token* cond,
+                                        DFState& state) {
+    if (!cond)
+        return;
+
+    // Recurse into && chain: "p && rest" — handle each side independently.
+    if (cond->str() == "&&") {
+        collectWhileExitConstraints(cond->astOperand1(), state);
+        collectWhileExitConstraints(cond->astOperand2(), state);
+        return;
+    }
+
+    // Only handle a direct pointer truth-test leaf: "while (... && p && ...)".
+    // Skip negation (!p), equality (p == nullptr), and non-pointer conditions.
+    if (!isTrackedPtrVar(cond))
+        return;
+
+    const nonneg int varId = cond->varId();
+    ValueFlow::Value nullVal(0LL);
+    nullVal.setPossible();
+
+    auto it = state.find(varId);
+    if (it == state.end()) {
+        // Variable not yet in state — inject fresh Possible null entry.
+        state[varId] = {nullVal};
+    } else {
+        // Variable already has values — only add if no non-impossible null
+        // is already present (avoid duplicates).
+        const bool hasNull = std::any_of(it->second.begin(), it->second.end(),
+                                         [](const ValueFlow::Value& v) {
+            return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+        });
+        if (!hasNull)
+            it->second.push_back(nullVal);
+    }
+}
+
+
+// ===========================================================================
 // 10. forwardAnalyzeBlock (Pass 1)
 // ===========================================================================
 
@@ -1333,6 +1389,38 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // We cannot determine the iteration count, so we must be
             // conservative (requirement 4).
             dropWrittenVars(bodyOpen->next(), bodyClose, ctx);
+
+            // Phase NW: after a while loop exits, its condition was false.
+            // Inject null constraints for pointer null-guards so that
+            // downstream null-pointer checkers can detect dereferences of the
+            // loop pointer after the loop.
+            //
+            // Two cases:
+            //   "while (p)"       → p is definitely null (Known null) on exit:
+            //                       the only way this condition is false is p==null.
+            //   "while (p && ...)" → p is possibly null (Possible null) on exit:
+            //                        the exit might have been caused by a different
+            //                        clause, so we cannot conclude p is null.
+            //
+            // Only "while" is handled here; "for" and "do-while" use different
+            // condition structures and are left for future work.
+            if (tok->str() == "while") {
+                const Token* condOpen = tok->next();
+                if (condOpen && condOpen->str() == "(") {
+                    const Token* condRoot = condOpen->astOperand2();
+                    if (condRoot) {
+                        if (isTrackedPtrVar(condRoot)) {
+                            // Simple "while (p)": loop exits iff p is null.
+                            applyConditionConstraint(condRoot, ctx.state,
+                                                     ctx.members,
+                                                     /*branchTaken=*/false);
+                        } else if (condRoot->str() == "&&") {
+                            // AND-chain: each null-guard pointer is Possible null.
+                            collectWhileExitConstraints(condRoot, ctx.state);
+                        }
+                    }
+                }
+            }
 
             // Skip the loop body in the outer walk (already handled above).
             tok = const_cast<Token*>(bodyClose);
