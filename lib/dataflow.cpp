@@ -40,8 +40,10 @@
  *        isLhsOfAssignment     — token is written, not read
  *        isFunctionCallOpen    — '(' opening a function call
  *   4. evalConstInt       — constant-fold expression to integer
- *                           (handles nullptr/NULL → 0 for pointer tracking)
+ *                           (handles nullptr/NULL → 0 for pointer tracking;
+ *                            looks through cast expressions — Phase Cast)
  *   4b. evalConstFloat    — constant-fold expression to float (Phase F)
+ *                           (also looks through cast expressions — Phase Cast)
  *   5. annotateTok        — write DFState values onto a token
  *      annotateMemberTok  — write DFMemberState values onto field token (Phase M)
  *      annotateContainerTok — write DFContState values onto container token (Phase C)
@@ -105,6 +107,16 @@
  *   emplace_back increment the known size; pop_back decrements it; clear
  *   resets it to 0.  The container variable token is annotated with the
  *   current size whenever it is read.
+ *
+ * CAST EXPRESSION VALUE PROPAGATION (Phase Cast):
+ *   evalConstInt and evalConstFloat look through C-style and C++ cast
+ *   expressions — "(T)expr" evaluates to the same value as expr.  This
+ *   allows assignments such as "int x = (int)5;" or "void* p = (void*)0;"
+ *   to propagate the constant value to the variable.
+ *   In addition, forwardAnalyzeBlock annotates the cast token '(' itself
+ *   with the evaluated value so that checkers examining expression-level
+ *   values (rather than variable-level values) find the same result as
+ *   ValueFlow would provide.
  */
 
 #include "dataflow.h"
@@ -332,6 +344,24 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
     if (!expr)
         return false;
 
+    // --- Cast expression: look through to the operand ---
+    // Phase Cast: "(T)expr" has the same integer value as expr.
+    // For a C-style cast the token structure is:
+    //   '(' (isCast==true)
+    //     astOperand1() → the expression being cast  (no astOperand2)
+    // For a C++ functional cast, e.g. int(expr):
+    //   '(' (isCast==true)
+    //     astOperand1() → type keyword
+    //     astOperand2() → the expression being cast
+    // We follow the same pattern used in programmemory.cpp (execute, cast branch).
+    if (expr->str() == "(" && expr->isCast()) {
+        if (expr->astOperand2())
+            return evalConstInt(expr->astOperand2(), state, result);
+        if (expr->astOperand1())
+            return evalConstInt(expr->astOperand1(), state, result);
+        return false;
+    }
+
     // --- nullptr keyword → null pointer constant 0 ---
     // Phase N: "nullptr" must evaluate to 0 so that pointer conditions such as
     // "p == nullptr" can be recognised by applyConditionConstraint.
@@ -439,6 +469,17 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
 static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::Value& result) {
     if (!expr)
         return false;
+
+    // --- Cast expression: look through to the operand ---
+    // Phase Cast: "(T)expr" has the same float value as expr.
+    // Mirrors the cast branch in evalConstInt.
+    if (expr->str() == "(" && expr->isCast()) {
+        if (expr->astOperand2())
+            return evalConstFloat(expr->astOperand2(), state, result);
+        if (expr->astOperand1())
+            return evalConstFloat(expr->astOperand1(), state, result);
+        return false;
+    }
 
     // --- Float literal ---
     if (expr->isNumber() && MathLib::isFloat(expr->str())) {
@@ -1514,6 +1555,26 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             annotateTok(tok, ctx.state);       // int, ptr, float, UNINIT
             annotateMemberTok(tok, ctx);       // Phase M: member field values
             annotateContainerTok(tok, ctx);    // Phase C: container size values
+        }
+
+        // =================================================================
+        // Cast expression: annotate the cast token with its evaluated value
+        // =================================================================
+        // Phase Cast: when a constant cast "(T)expr" appears, write the
+        // evaluated integer value onto the cast token '(' so that checkers
+        // examining expression values find the same result as ValueFlow.
+        // Requirement: the cast token must carry the value of the cast
+        // expression so that downstream checkers do not need special-case
+        // handling for cast nodes.
+        if (tok->str() == "(" && tok->isCast()) {
+            ValueFlow::Value val;
+            if (evalConstInt(tok, ctx.state, val)) {
+                val.setKnown();
+                tok->addValue(val);
+            } else if (evalConstFloat(tok, ctx.state, val)) {
+                val.setKnown();
+                tok->addValue(val);
+            }
         }
     }
 }

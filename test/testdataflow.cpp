@@ -98,6 +98,9 @@ private:
         // Phase C — Container size tracking
         TEST_CASE(containerSize);
 
+        // Phase Cast — Cast expression value propagation
+        TEST_CASE(castValuePropagation);
+
         // False-positive regression tests (grows as trac tickets are resolved)
         TEST_CASE(falsePositiveRegression);
     }
@@ -175,6 +178,27 @@ private:
             if (std::any_of(tok->values().cbegin(), tok->values().cend(),
                             [](const ValueFlow::Value& v) {
                 return v.isUninitValue();
+            }))
+                return true;
+        }
+        return false;
+    }
+
+    /// Returns true when the first cast token '(' at line `linenr` has a
+    /// Known integer value equal to `value`.
+    ///
+    /// Phase Cast: used to verify that the cast expression token is annotated
+    /// with the evaluated value (not just the variable it is assigned to).
+    bool testCastKnown(const char code[], unsigned int linenr, int value) {
+        SimpleTokenizer tokenizer(settings, *this);
+        if (!tokenizer.tokenize(code))
+            return false;
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "(" || !tok->isCast() || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [value](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.isKnown() && v.intvalue == value;
             }))
                 return true;
         }
@@ -1020,6 +1044,62 @@ private:
                                 "  (void)x;\n"                         // 7  ← size 0
                                 "}\n";
             ASSERT(testContainerSizeKnown(code, 7, 0, stdSettings));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase Cast — Cast expression value propagation
+    // -----------------------------------------------------------------------
+    void castValuePropagation() {
+        // Cast1: C-style integer cast of a literal — value propagates through.
+        // Requirement: "(int)(5)" evaluates to 5; the assigned variable gets
+        // the known value 5.
+        {
+            const char code[] = "void f() {\n"           // 1
+                                "  int x = (int)(5);\n"  // 2
+                                "  (void)x;\n"           // 3  ← x must be Known 5
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 5));
+        }
+
+        // Cast2: C-style pointer cast of a null constant — the null value
+        // propagates through the cast so that ptr is Known null (0).
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  void* x = (void*)0;\n"   // 2
+                                "  (void)x;\n"              // 3  ← x must be Known 0
+                                "}\n";
+            ASSERT(testValueOfXKnown(code, 3, 0));
+        }
+
+        // Cast3: C-style pointer cast of a non-zero constant — the pointer is
+        // NOT null so the state must be cleared (no Known 0 value).
+        {
+            const char code[] = "void f() {\n"               // 1
+                                "  void* x = (void*)(-1);\n" // 2
+                                "  (void)x;\n"               // 3  ← x must NOT be null
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+        }
+
+        // Cast4: cast of an unknown (non-constant) expression — no value.
+        {
+            const char code[] = "void f(int n) {\n"         // 1
+                                "  int x = (int)(n);\n"     // 2
+                                "  (void)x;\n"              // 3  ← no known value
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 3, 0));
+        }
+
+        // Cast5: the cast token itself must carry the evaluated value.
+        // Requirement: DataFlow annotates the '(' cast token so that checkers
+        // examining expression values see the same result as ValueFlow.
+        {
+            const char code[] = "void f() {\n"           // 1
+                                "  int x = (int)(5);\n"  // 2  ← cast token on line 2
+                                "  (void)x;\n"           // 3
+                                "}\n";
+            ASSERT(testCastKnown(code, 2, 5));
         }
     }
 
