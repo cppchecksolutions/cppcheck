@@ -1275,6 +1275,19 @@ private:
                                 "}\n";
             ASSERT(testValueOfXUninit(code, 9));
         }
+
+        // U8: stream read ("s >> x") clears UNINIT — x is not uninit after the read.
+        {
+            const char code[] = "struct Stream {};\n"                      // 1
+                                "Stream& operator>>(Stream&, double&);\n"  // 2
+                                "void f() {\n"                             // 3
+                                "  double x;\n"                            // 4  ← no init
+                                "  Stream s;\n"                            // 5
+                                "  s >> x;\n"                              // 6  ← stream read
+                                "  (void)x;\n"                             // 7  ← NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
     }
 
     // -----------------------------------------------------------------------

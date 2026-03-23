@@ -121,6 +121,7 @@
 
 #include "dataflow.h"
 
+#include "astutils.h"
 #include "mathlib.h"
 #include "symboldatabase.h"
 #include "token.h"
@@ -1575,6 +1576,20 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     ct = ct->link();
             }
 
+            // Phase U-SR: stream reads in the condition — "stream >> var" assigns var.
+            // The condition tokens are not visited by the main token-walker, so
+            // stream-read assignments must be applied here before forking.
+            for (const Token* ct = parenOpen->next(); ct && ct != parenClose; ct = ct->next()) {
+                if (ct->str() == ">>" && isLikelyStreamRead(ct)) {
+                    const Token* rhs = ct->astOperand2();
+                    if (rhs && rhs->varId() > 0) {
+                        const nonneg int varId = rhs->varId();
+                        ctx.uninits.erase(varId);
+                        ctx.state.erase(varId);
+                    }
+                }
+            }
+
             // Fork: both branches start from the post-condition-call context.
             DFContext ctxThen = ctx;
             DFContext ctxElse = ctx;
@@ -2151,6 +2166,21 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 ctx.state.erase(varId);
             }
             continue;
+        }
+
+        // =================================================================
+        // Phase U-SR: stream read — "stream >> var" assigns var
+        // =================================================================
+        // The >> operator used for stream extraction (isLikelyStreamRead)
+        // writes to its RHS operand. Treat it as an assignment: clear UNINIT
+        // from state and uninits set so the variable is not flagged as uninit.
+        if (tok->str() == ">>" && isLikelyStreamRead(tok)) {
+            const Token* rhs = tok->astOperand2();
+            if (rhs && rhs->varId() > 0) {
+                const nonneg int varId = rhs->varId();
+                ctx.uninits.erase(varId);
+                ctx.state.erase(varId);
+            }
         }
 
         // =================================================================
