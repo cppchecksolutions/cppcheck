@@ -2011,6 +2011,41 @@ private:
             });
             ASSERT(!hasNullableZero);
         }
+
+        // FP8: pointer returned from member function call (unknown result),
+        //      null-checked with early return, then dereferenced on the surviving
+        //      path.  The dereference must not carry a nullable null value.
+        //
+        //      Regression test for lib/astutils.cpp:334 false positive:
+        //        const auto* function = settings.library.getFunction(tok);
+        //        if (!function)
+        //            return Library::Container::Yield::NO_YIELD;
+        //        return function->containerYield;  ← function must NOT be possibly null
+        //
+        //      Root cause: when merging the if-then branch (terminates with return)
+        //      with the else branch (null check is false), DataFlow must use only
+        //      the else-branch state (which has Impossible(0) from applyCondition
+        //      Constraint), not merge it back with the unreachable then-branch.
+        {
+            const char code[] = "struct Lib { const void* getFunc(const char*) const; };\n" // 1
+                                "struct Func { int y; };\n"                                 // 2
+                                "Lib lib;\n"                                               // 3
+                                "int test(const char* name) {\n"                           // 4
+                                "  const Func* function = (const Func*)lib.getFunc(name);\n" // 5
+                                "  if (!function)\n"                                       // 6
+                                "    return 0;\n"                                          // 7
+                                "  return function->y;\n"                                  // 8  ← must NOT be possibly null
+                                "}\n";
+            // After the null check + early return at line 6-7, function is
+            // guaranteed to be non-null on line 8.  The analysis must NOT attach
+            // a nullable (non-impossible) null value to function at the dereference.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "function ->");
+            const bool hasNullableZero = std::any_of(values.cbegin(), values.cend(),
+                                                     [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            });
+            ASSERT(!hasNullableZero);
+        }
     }
 };
 

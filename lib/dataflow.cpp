@@ -779,6 +779,21 @@ static DFState mergeStates(const DFState& s1, const DFState& s2) {
             continue;
         }
 
+        // Requirement (Phase N): if either path has Impossible(0) on a pointer,
+        // it means "definitely not null" on that path. Preserve the Impossible
+        // value in the merge to prevent false positives from conservative analysis.
+        // Example: if (!ptr) { return; } else { ... }
+        //   Then-path (unreachable): ptr = Known(0)
+        //   Else-path (surviving): ptr = Impossible(0)
+        // Merging Known(0) with Impossible(0) should NOT produce Possible(0)
+        // because the surviving path definitely has non-null ptr.
+        if (vals1.size() == 1 && vals2.size() == 1 &&
+            vals1[0].isImpossible() && vals2[0].isImpossible() &&
+            vals1[0].equalValue(vals2[0])) {
+            result[varId] = vals1;  // Keep Impossible(0) on both paths
+            continue;
+        }
+
         // Otherwise: union of all values, all marked Possible
         DFValues merged;
         for (const ValueFlow::Value& v : vals1) {
@@ -823,6 +838,16 @@ static DFMemberState mergeMemberStates(const DFMemberState& s1,
             vals1[0].isKnown() && vals2[0].isKnown() &&
             vals1[0].equalValue(vals2[0])) {
             result[key] = vals1;
+            continue;
+        }
+
+        // Requirement (Phase MN): preserve Impossible values during merge to
+        // prevent false positives on member pointer fields. Same logic as
+        // mergeStates for simple variables.
+        if (vals1.size() == 1 && vals2.size() == 1 &&
+            vals1[0].isImpossible() && vals2[0].isImpossible() &&
+            vals1[0].equalValue(vals2[0])) {
+            result[key] = vals1;  // Keep Impossible value
             continue;
         }
 
@@ -881,20 +906,29 @@ static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
 /// skipped (via link()) to avoid false positives from inner returns that do
 /// not exit the outer block.
 ///
+/// Requirement: handle simple cases (return at statement level) conservatively.
+/// If any token matches return/throw/break/continue, the block terminates.
+///
 /// Used by forwardAnalyzeBlock to detect when a then-branch exits its scope,
 /// allowing the analysis to use the surviving-path state directly rather than
 /// merging with a dead state.
 static bool blockTerminates(const Token* start, const Token* end) {
+    if (!start || !end || start == end)
+        return false;
+    
     for (const Token* tok = start; tok && tok != end; tok = tok->next()) {
+        // Skip nested blocks — inner return/break does not terminate the outer block
         if (tok->str() == "{") {
-            // Skip nested block — inner return/break does not terminate the outer block
             if (tok->link())
                 tok = tok->link();
             continue;
         }
+        
+        // Check for explicit termination keywords
         if (Token::Match(tok, "return|throw|break|continue"))
             return true;
     }
+    
     return false;
 }
 
