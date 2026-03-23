@@ -1371,9 +1371,17 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
 
                 // Phases U / U2 / F: uninit detection for int/ptr/float
+                // Requirement: only inject UNINIT when the variable truly has
+                // no initializer.  Variable::isInit() covers all three forms:
+                //   "T x = v"  (assignment-init)
+                //   "T x{}"    (brace-init, value-initializes to zero/nullptr)
+                //   "T x(v)"   (paren-init / direct-init)
+                // The former isLhsOfAssignment() check only recognised the "="
+                // form and caused false positives for brace-initialized vars,
+                // e.g. "const Foo* p{}" was incorrectly treated as uninit.
                 if ((isTrackedVar(tok) || isTrackedPtrVar(tok) ||
                      isTrackedFloatVar(tok)) &&
-                    !isLhsOfAssignment(tok)) {
+                    !declVar->isInit()) {
                     // Variable declared without an initializer.
                     ValueFlow::Value uninit;
                     uninit.valueType = ValueFlow::Value::ValueType::UNINIT;

@@ -2046,6 +2046,36 @@ private:
             });
             ASSERT(!hasNullableZero);
         }
+
+        // FP9: pointer declared with brace-initialization ("T* p{}") is
+        // value-initialized to nullptr — it must NOT be marked UNINIT.
+        // Regression for lib/astutils.cpp:298:
+        //   const Library::Container* cont{};
+        //   if (...) { ... cont = library.detectContainer(...) ... }
+        //   return { ..., cont ? cont : tok->valueType()->container };
+        // Root cause: isLhsOfAssignment() does not cover brace-init.
+        {
+            const char code[] = "struct S { int f; };\n"        // 1
+                                "void foo() {\n"                 // 2
+                                "  S* x{};\n"                    // 3  brace-init → nullptr
+                                "  (void)x;\n"                   // 4
+                                "}\n";
+            // Requirement: a pointer declared with {} is value-initialized to
+            // nullptr, so it must NOT receive an UNINIT value.
+            ASSERT(!testValueOfXUninit(code, 4));
+        }
+
+        // FP10: integer declared with brace-initialization ("int x{}") is
+        // zero-initialized — it must NOT be marked UNINIT.
+        {
+            const char code[] = "void foo() {\n"    // 1
+                                "  int x{};\n"      // 2  brace-init → 0
+                                "  (void)x;\n"      // 3
+                                "}\n";
+            // Requirement: an integer declared with {} is zero-initialized,
+            // so it must NOT receive an UNINIT value.
+            ASSERT(!testValueOfXUninit(code, 3));
+        }
     }
 };
 
