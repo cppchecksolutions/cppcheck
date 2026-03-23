@@ -625,6 +625,29 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
 /// int/ptr constraint values from conditions.  Float variables will never
 /// have backward constraint entries, so the isTrackedFloatVar guard is
 /// effectively dead in the backward pass (but harmless).
+// Requirement: when a pointer token is evaluated on the RHS of a logical-AND
+// expression "lhs && rhs", and lhs is the same pointer variable, rhs executes
+// only when lhs is true. In that context the pointer is known non-null, so
+// nullable-zero annotations from loop-exit state must not be attached to rhs
+// uses (otherwise CheckNullPointer gets a false positive).
+static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+
+    const nonneg int varId = tok->varId();
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
+        if (parent->str() != "&&")
+            continue;
+        if (parent->astOperand2() != child)
+            continue;
+        const Token* lhs = parent->astOperand1();
+        if (lhs && lhs->varId() == varId && isTrackedPtrVar(lhs))
+            return true;
+    }
+    return false;
+}
+
 static void annotateTok(Token* tok, const DFState& state) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
@@ -642,8 +665,12 @@ static void annotateTok(Token* tok, const DFState& state) {
     if (it == state.end())
         return;
 
-    for (const ValueFlow::Value& val : it->second)
+    const bool guardedRhs = isRhsOfGuardedAndBySameVar(tok);
+    for (const ValueFlow::Value& val : it->second) {
+        if (guardedRhs && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+            continue;
         tok->addValue(val);
+    }
 }
 
 /// Phase M: annotate the field token of a member-access read "obj.field"

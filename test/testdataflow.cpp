@@ -1987,6 +1987,30 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // FP7: in "x && (x->...)" the RHS is evaluated only when x is true.
+        //      Even after "while (x && pred(x))", the dereference token in
+        //      the RHS must not keep a non-impossible null(0) value.
+        //
+        //      This guards against false positives like:
+        //        return tok && (tok->... || ...);
+        {
+            const char code[] = "struct T { int v; };\n"      // 1
+                                "bool pred(const T*);\n"      // 2
+                                "const T* next(const T*);\n"  // 3
+                                "bool f(const T* x) {\n"      // 4
+                                "  while (x && pred(x))\n"    // 5
+                                "    x = next(x);\n"          // 6
+                                "  return x && (x->v == 1);\n"// 7
+                                "}\n";
+
+            const std::list<ValueFlow::Value> values = tokenValues(code, "%var% ->");
+            const bool hasNullableZero = std::any_of(values.cbegin(), values.cend(),
+                                                     [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            });
+            ASSERT(!hasNullableZero);
+        }
     }
 };
 
