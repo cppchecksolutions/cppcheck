@@ -1959,6 +1959,34 @@ private:
             // when it detects a function call with &x in the if-condition.
             ASSERT(!testValueOfXKnown(code, 7, 0));
         }
+
+        // FP5: scalar passed by address as an out-parameter in an if-condition.
+        //      The call may initialize x, so x must NOT be reported UNINIT after
+        //      the condition.
+        {
+            const char code[] = "bool init(bool* out);\n"   // 1
+                                "void f() {\n"              // 2
+                                "  bool x;\n"               // 3
+                                "  if (init(&x))\n"         // 4
+                                "    return;\n"             // 5
+                                "  (void)x;\n"              // 6  <- must not be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
+
+        // FP6: call returns a pointer and also receives '&x' out-parameter;
+        //      x is only used when the return value indicates success.
+        //      This mirrors lib/library.cpp detectContainerOrIterator().
+        {
+            const char code[] = "const int* init(bool* out);\n"  // 1
+                                "void f(bool* out) {\n"          // 2
+                                "  bool x;\n"                    // 3
+                                "  const int* c = init(&x);\n"   // 4
+                                "  if (c && out)\n"              // 5
+                                "    *out = x;\n"                // 6  <- must not be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 };
 

@@ -1395,6 +1395,23 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                  ct && ct != parenClose; ct = ct->next()) {
                 if (!isFunctionCallOpen(ct))
                     continue;
+
+                // Requirement: if '&var' is passed to this call, the callee
+                // may initialize var through that pointer.  Do not re-inject
+                // UNINIT for such varIds after the call.
+                std::unordered_set<nonneg int> callOutVars;
+                if (ct->link()) {
+                    for (const Token* argTok = ct->next();
+                         argTok && argTok != ct->link();
+                         argTok = argTok->next()) {
+                        if (argTok->str() == "&" && !argTok->astOperand2()) {
+                            const Token* operand = argTok->astOperand1();
+                            if (operand && operand->varId() > 0)
+                                callOutVars.insert(operand->varId());
+                        }
+                    }
+                }
+
                 // Erase all variables that a callee could modify.
                 // Local scalars whose address was never taken are safe.
                 for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
@@ -1409,6 +1426,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 // Re-inject UNINIT(Possible) for variables in the uninit set.
                 // (mirrors the U2 logic in the statement-level call handler)
                 for (const nonneg int varId : ctx.uninits) {
+                    if (callOutVars.count(varId))
+                        continue;
                     ValueFlow::Value u;
                     u.valueType = ValueFlow::Value::ValueType::UNINIT;
                     u.setPossible();
@@ -1639,6 +1658,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // only the specifically-tracked container size is preserved.
         if (isFunctionCallOpen(tok)) {
             bool isKnownContainerMethod = false;
+            std::unordered_set<nonneg int> callOutVars;
 
             // Phase C: detect container method calls and update size.
             // AST for "v.push_back(x)":
@@ -1717,6 +1737,19 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     annotateMemberTok(argTok, ctx);
                     annotateContainerTok(argTok, ctx);
                 }
+
+                // Requirement: unary '&var' argument indicates potential
+                // out-parameter write by the callee.  Avoid re-injecting
+                // UNINIT for such vars immediately after this call.
+                if (argTok->str() == "&" && !argTok->astOperand2()) {
+                    const Token* operand = argTok->astOperand1();
+                    if (operand && operand->varId() > 0) {
+                        // Also mark as address-taken before the clear step so
+                        // local-scalar preservation does not keep stale UNINIT.
+                        ctx.addressTaken.insert(operand->varId());
+                        callOutVars.insert(operand->varId());
+                    }
+                }
             }
 
             // Phase L: selectively clear state, preserving local scalars
@@ -1747,6 +1780,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // This ensures that "still uninit" variables remain visible
             // after a function call.
             for (const nonneg int varId : ctx.uninits) {
+                if (callOutVars.count(varId))
+                    continue;
                 ValueFlow::Value u;
                 u.valueType = ValueFlow::Value::ValueType::UNINIT;
                 u.setPossible();
