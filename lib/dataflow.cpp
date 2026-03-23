@@ -1351,7 +1351,77 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (!thenClose)
                 return;
 
-            // Fork: both branches start from the current context.
+            // ----------------------------------------------------------------
+            // Phase NC: apply the side-effects of any function calls that
+            // appear inside the if-condition.
+            //
+            // Requirement: the condition expression is evaluated exactly once
+            // before the branch, so any function call within it executes
+            // unconditionally.  The main token-walker never visits condition
+            // tokens (it skips them via tok = thenClose), so the call's
+            // effects on local state must be applied here BEFORE forking, so
+            // that both branches start from the post-call state.
+            //
+            // Common case: "if (getS(&x)) return;" — after the call, x may
+            // have been set to a non-null value, so x must be cleared from
+            // state (no longer Known null/zero).
+            //
+            // Implementation: two-pass scan of the condition tokens.
+            //   Pass 1 — collect address-of (&var) operands into addressTaken
+            //             so that pass 2 knows which locals escape.
+            //   Pass 2 — for each function-call opening '(', clear all
+            //             non-local-scalar / address-taken variables from ctx
+            //             and re-inject UNINIT for variables in ctx.uninits,
+            //             then skip to the matching ')' to avoid processing
+            //             inner calls redundantly.
+            // ----------------------------------------------------------------
+
+            // Pass 1: collect address-taken variables from the condition.
+            // Any variable whose address is taken (&var) can be modified
+            // by a called function, so it must not be preserved across calls.
+            for (const Token* ct = parenOpen->next();
+                 ct && ct != parenClose; ct = ct->next()) {
+                // Unary '&': no right-hand operand in the AST.
+                if (ct->str() == "&" && !ct->astOperand2()) {
+                    const Token* operand = ct->astOperand1();
+                    if (operand && operand->varId() > 0)
+                        ctx.addressTaken.insert(operand->varId());
+                }
+            }
+
+            // Pass 2: for each function call in the condition, conservatively
+            // clear the state (same logic as for statement-level calls).
+            for (const Token* ct = parenOpen->next();
+                 ct && ct != parenClose; ct = ct->next()) {
+                if (!isFunctionCallOpen(ct))
+                    continue;
+                // Erase all variables that a callee could modify.
+                // Local scalars whose address was never taken are safe.
+                for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
+                    const nonneg int varId = it->first;
+                    if (ctx.localScalars.count(varId) &&
+                        !ctx.addressTaken.count(varId))
+                        ++it;  // safe local scalar — preserve
+                    else
+                        it = ctx.state.erase(it);
+                }
+                ctx.members.clear();
+                // Re-inject UNINIT(Possible) for variables in the uninit set.
+                // (mirrors the U2 logic in the statement-level call handler)
+                for (const nonneg int varId : ctx.uninits) {
+                    ValueFlow::Value u;
+                    u.valueType = ValueFlow::Value::ValueType::UNINIT;
+                    u.setPossible();
+                    ctx.state[varId] = {u};
+                }
+                // Skip to the matching ')' to avoid processing inner/nested
+                // function calls separately — the outer call's clearing
+                // already covers all variables they could modify.
+                if (ct->link())
+                    ct = ct->link();
+            }
+
+            // Fork: both branches start from the post-condition-call context.
             DFContext ctxThen = ctx;
             DFContext ctxElse = ctx;
 

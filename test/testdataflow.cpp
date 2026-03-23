@@ -1935,6 +1935,30 @@ private:
             ASSERT(!testValueOfXKnown(code, 3, 0));
             ASSERT(testValueOfXUninit(code, 3));
         }
+
+        // FP4: pointer assigned null, then a function takes its address as an
+        //      out-parameter inside an if-condition.  The callee may have written
+        //      a non-null value through the pointer, so x must NOT remain Known
+        //      null after the if-block.
+        //
+        //      Regression test for lib/library.cpp:1326 false positive:
+        //        const Function* func = nullptr;
+        //        if (isNotLibraryFunction(ftok, &func)) return nullptr;
+        //        func->argumentChecks...   ← must not be reported null
+        {
+            const char code[] = "struct S { int f; };\n"       // 1
+                                "bool getS(S** p);\n"          // 2
+                                "void test() {\n"              // 3
+                                "  S* x = nullptr;\n"          // 4
+                                "  if (getS(&x))\n"            // 5
+                                "    return;\n"                // 6
+                                "  (void)x->f;\n"              // 7  ← x must NOT be Known null
+                                "}\n";
+            // After getS(&x), x may have been set to a non-null value.
+            // The dataflow analysis must clear the Known-null state for x
+            // when it detects a function call with &x in the if-condition.
+            ASSERT(!testValueOfXKnown(code, 7, 0));
+        }
     }
 };
 
