@@ -1287,6 +1287,56 @@ static void collectWhileExitConstraints(const Token* cond,
 // 10. forwardAnalyzeBlock (Pass 1)
 // ===========================================================================
 
+// Collect varIds of variables that a function call may initialize via
+// non-const lvalue reference parameters.
+//
+// Requirement: when the called function's declaration is visible and a
+// parameter is a non-const lvalue reference (e.g. "int&"), the corresponding
+// argument variable may be written through that reference.  We must not
+// re-inject UNINIT for it after the call — same treatment as &var (pointer
+// out-parameters).
+//
+// tok   — the opening '(' of the function call
+// out   — set to receive the varIds of reference-out arguments
+static void collectRefOutVars(const Token* tok,
+                               std::unordered_set<nonneg int>& out)
+{
+    if (!tok || !tok->previous())
+        return;
+    // Look up the Function object from the declaration.
+    const Function* func = tok->previous()->function();
+    if (!func)
+        return;  // no declaration visible — conservative: do nothing
+
+    nonneg int argIndex = 0;
+    for (const Token* argTok = tok->next();
+         argTok && argTok != tok->link();
+         argTok = argTok->next()) {
+
+        // Skip nested parenthesized groups (inner calls, casts, etc.) so
+        // that commas inside them do not advance our argument counter.
+        if (argTok->str() == "(" && argTok->link()) {
+            argTok = argTok->link();
+            continue;
+        }
+        // Top-level comma: advance to next argument.
+        if (argTok->str() == ",") {
+            ++argIndex;
+            continue;
+        }
+        // Plain variable token at the current argument position.
+        if (argTok->varId() > 0 && argTok->isName()) {
+            const Variable* param = func->getArgumentVar(argIndex);
+            // Requirement: only non-const lvalue references are out-parameters.
+            // Const references are read-only; rvalue references are not written
+            // back to the caller's variable.
+            if (param && param->isReference() &&
+                !param->isConst() && !param->isRValueReference())
+                out.insert(argTok->varId());
+        }
+    }
+}
+
 // Forward declaration — needed because if-branches recurse.
 static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 DFContext& ctx,
@@ -1480,6 +1530,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         }
                     }
                 }
+                // Requirement: also handle direct non-const reference arguments
+                // in condition-level function calls (same logic as site #1).
+                collectRefOutVars(ct, callOutVars);
 
                 // Erase all variables that a callee could modify.
                 // Local scalars whose address was never taken are safe.
@@ -1818,6 +1871,20 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         ctx.addressTaken.insert(operand->varId());
                         callOutVars.insert(operand->varId());
                     }
+                }
+            }
+
+            // Requirement: also handle variables passed as direct non-const
+            // reference arguments (e.g. init(x) where init takes int&).
+            // The callee may initialize such variables, so treat them the same
+            // as address-taken out-pointer arguments: clear stale UNINIT state
+            // and skip re-injection after the call.
+            {
+                std::unordered_set<nonneg int> refOutVars;
+                collectRefOutVars(tok, refOutVars);
+                for (const nonneg int vid : refOutVars) {
+                    ctx.addressTaken.insert(vid);  // Phase L: don't preserve stale UNINIT
+                    callOutVars.insert(vid);        // Phase U2: don't re-inject UNINIT
                 }
             }
 

@@ -2076,6 +2076,35 @@ private:
             // so it must NOT receive an UNINIT value.
             ASSERT(!testValueOfXUninit(code, 3));
         }
+
+        // FP11: scalar passed by non-const reference to a declared-only
+        // function must not be UNINIT after the call.  The callee likely
+        // initializes x through the reference parameter.
+        {
+            const char code[] = "void init(int&);\n"   // 1
+                                "int f() {\n"          // 2
+                                "  int x;\n"           // 3
+                                "  init(x);\n"         // 4
+                                "  return x;\n"        // 5
+                                "}\n";
+            // Requirement: x is passed as a non-const reference so the callee
+            // can write to it.  x must NOT be UNINIT at line 5.
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
+
+        // FP11b: scalar passed by const reference — callee can only read x,
+        // not write it.  x must still be flagged as UNINIT at return.
+        {
+            const char code[] = "void observe(const int&);\n"  // 1
+                                "int f() {\n"                  // 2
+                                "  int x;\n"                   // 3
+                                "  observe(x);\n"              // 4
+                                "  return x;\n"                // 5
+                                "}\n";
+            // Requirement: const-ref does not allow the callee to initialize x,
+            // so x must still be UNINIT at line 5.
+            ASSERT(testValueOfXUninit(code, 5));
+        }
     }
 };
 
