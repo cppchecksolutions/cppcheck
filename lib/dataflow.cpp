@@ -1039,6 +1039,19 @@ static void applyConditionConstraint(const Token* condRoot,
     }
 
     // -----------------------------------------------------------------
+    // Logical AND: "a && b"
+    //   branchTaken=true:  both operands must be true → recurse on each
+    //   branchTaken=false: either side could be false → can't constrain
+    // -----------------------------------------------------------------
+    if (condRoot->str() == "&&") {
+        if (branchTaken) {
+            applyConditionConstraint(condRoot->astOperand1(), state, members, true);
+            applyConditionConstraint(condRoot->astOperand2(), state, members, true);
+        }
+        return;
+    }
+
+    // -----------------------------------------------------------------
     // Equality / inequality: "x == const", "x != const",
     //                        "p == nullptr", "p != nullptr",
     //                        "s.x == nullptr", "s.x != nullptr"

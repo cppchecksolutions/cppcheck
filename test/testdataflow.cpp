@@ -2126,6 +2126,33 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 7));
         }
+
+        // FP13: pointer used inside the body of "if (p && p->field)" must not
+        //       carry a nullable null value.  The if-condition's LHS null-guard
+        //       must constrain p to non-null in the then-block.
+        //       Regression for lib/checkcondition.cpp:9 false positive:
+        //         while (scope && scope->isLocal()) scope = scope->nestedIn;
+        //         if (scope && scope->type == ScopeType::eFunction) {
+        //             const Function *func = scope->function;  ← FP nullPointer
+        //         }
+        {
+            const char code[] = "struct S { int type; int val; };\n"  // 1
+                                "const S* next(const S*);\n"          // 2
+                                "void f(const S* p) {\n"              // 3
+                                "  while (p && p->type == 1)\n"       // 4
+                                "    p = next(p);\n"                  // 5
+                                "  if (p && p->type == 2) {\n"        // 6
+                                "    int x = p->val;\n"               // 7  must NOT be possibly null
+                                "    (void)x;\n"                      // 8
+                                "  }\n"                               // 9
+                                "}\n";
+            const std::list<ValueFlow::Value> values = tokenValues(code, "p -> val");
+            const bool hasNullableZero = std::any_of(values.cbegin(), values.cend(),
+                                                     [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            });
+            ASSERT(!hasNullableZero);
+        }
     }
 };
 
