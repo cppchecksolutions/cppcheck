@@ -1870,6 +1870,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // local-scalar preservation does not keep stale UNINIT.
                         ctx.addressTaken.insert(operand->varId());
                         callOutVars.insert(operand->varId());
+                        // Remove from uninits so that subsequent unrelated
+                        // function calls do not re-inject UNINIT for this var.
+                        ctx.uninits.erase(operand->varId());
                     }
                 }
             }
@@ -1885,6 +1888,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 for (const nonneg int vid : refOutVars) {
                     ctx.addressTaken.insert(vid);  // Phase L: don't preserve stale UNINIT
                     callOutVars.insert(vid);        // Phase U2: don't re-inject UNINIT
+                    // Remove from uninits so that subsequent unrelated function
+                    // calls do not re-inject UNINIT for this variable.
+                    ctx.uninits.erase(vid);
                 }
             }
 

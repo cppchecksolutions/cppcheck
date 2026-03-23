@@ -2105,6 +2105,27 @@ private:
             // so x must still be UNINIT at line 5.
             ASSERT(testValueOfXUninit(code, 5));
         }
+
+        // FP12: scalar passed by non-const reference in a statement-level call,
+        //       followed by a second unrelated function call.  The second call
+        //       must NOT re-inject UNINIT for x — the first call may have
+        //       initialized x through the reference parameter.
+        //       Mirrors lib/astutils.cpp:
+        //         int argnr;
+        //         const Token* ftok = getTokenArgumentFunction(tok, argnr);
+        //         const Function* func = ftok->function();
+        //         if (func) { int a = argnr; }  ← false positive without fix
+        {
+            const char code[] = "struct T { const void* g() const; };\n"  // 1
+                                "T* init(T*, int&);\n"                     // 2
+                                "void f(T* tok) {\n"                       // 3
+                                "  int x;\n"                               // 4
+                                "  T* t = init(tok, x);\n"                 // 5  x written via ref
+                                "  t->g();\n"                              // 6  second call
+                                "  (void)x;\n"                             // 7  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
     }
 };
 
