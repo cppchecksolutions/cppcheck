@@ -1288,6 +1288,30 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 7));
         }
+
+        // U9: else-if chain where only the assigning branch falls through.
+        //     The else-if and else branches both return, so code after the
+        //     if-else-if-else can only be reached when the first branch ran
+        //     (where x was assigned).  x must NOT be marked uninit after the
+        //     chain.
+        //
+        //     After tokenizer simplification "else if" becomes "else { if ... }",
+        //     so blockTerminates must detect that an if-else where both branches
+        //     terminate causes the enclosing else block to terminate too.
+        {
+            const char code[] = "void f(int c) {\n"             // 1
+                                "  int x;\n"                     // 2  ← declared without init
+                                "  if (c == 1) {\n"              // 3
+                                "    x = 1;\n"                   // 4  ← assigned here
+                                "  } else if (c == 2) {\n"       // 5
+                                "    return;\n"                  // 6  ← returns, x not assigned
+                                "  } else {\n"                   // 7
+                                "    return;\n"                  // 8  ← returns, x not assigned
+                                "  }\n"                          // 9
+                                "  (void)x;\n"                   // 10 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 10));
+        }
     }
 
     // -----------------------------------------------------------------------

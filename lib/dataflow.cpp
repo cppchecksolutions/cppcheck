@@ -1075,33 +1075,75 @@ static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
 /// Returns true when every execution path through [start, end) ends with an
 /// unconditional exit: return, throw, break, or continue.
 ///
-/// Only top-level statements are checked; tokens inside nested blocks are
-/// skipped (via link()) to avoid false positives from inner returns that do
-/// not exit the outer block.
+/// Top-level return/throw/break/continue are detected directly.  In addition,
+/// an if-else statement where BOTH the then-block and the else-block terminate
+/// (checked recursively) is treated as a terminator — this handles the
+/// "else-if chain" pattern where the tokenizer has converted
+///   "else if (...) { return; } else { return; }"
+/// into
+///   "else { if (...) { return; } else { return; } }"
+/// so that a variable assigned only in the first branch is not mistakenly
+/// marked as possibly-uninit after the chain.
 ///
-/// Requirement: handle simple cases (return at statement level) conservatively.
-/// If any token matches return/throw/break/continue, the block terminates.
-///
-/// Used by forwardAnalyzeBlock to detect when a then-branch exits its scope,
+/// Used by forwardAnalyzeBlock to detect when a branch exits its scope,
 /// allowing the analysis to use the surviving-path state directly rather than
 /// merging with a dead state.
 static bool blockTerminates(const Token* start, const Token* end) {
     if (!start || !end || start == end)
         return false;
-    
+
     for (const Token* tok = start; tok && tok != end; tok = tok->next()) {
-        // Skip nested blocks — inner return/break does not terminate the outer block
+        // Check for explicit termination keywords at statement level.
+        if (Token::Match(tok, "return|throw|break|continue"))
+            return true;
+
+        // Check whether an if-else statement terminates all paths.
+        // Requirement: only if-else (not bare if) counts — a bare if only
+        // terminates the conditional path, not the fall-through path.
+        if (tok->str() == "if") {
+            const Token* condOpen = tok->next();
+            if (!condOpen || condOpen->str() != "(")
+                continue;
+            const Token* condClose = condOpen->link();
+            if (!condClose)
+                continue;
+            const Token* thenOpen = condClose->next();
+            if (!thenOpen || thenOpen->str() != "{")
+                continue;
+            const Token* thenClose = thenOpen->link();
+            if (!thenClose)
+                continue;
+
+            const Token* afterThen = thenClose->next();
+            if (Token::simpleMatch(afterThen, "else {")) {
+                const Token* elseOpen  = afterThen->next();
+                const Token* elseClose = elseOpen ? elseOpen->link() : nullptr;
+                if (elseClose &&
+                    blockTerminates(thenOpen->next(), thenClose) &&
+                    blockTerminates(elseOpen->next(), elseClose)) {
+                    // Both branches terminate — the if-else is an unconditional exit.
+                    return true;
+                }
+                // Advance past the else block so the outer loop does not
+                // re-enter it and mis-detect inner returns as top-level ones.
+                if (elseClose)
+                    tok = const_cast<Token*>(elseClose);
+            } else {
+                // No else: only one branch terminates — skip the then block.
+                tok = const_cast<Token*>(thenClose);
+            }
+            continue;
+        }
+
+        // Skip other nested blocks — inner return/break does not terminate
+        // the outer block on its own.
         if (tok->str() == "{") {
             if (tok->link())
                 tok = tok->link();
             continue;
         }
-        
-        // Check for explicit termination keywords
-        if (Token::Match(tok, "return|throw|break|continue"))
-            return true;
     }
-    
+
     return false;
 }
 
