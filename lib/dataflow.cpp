@@ -919,6 +919,32 @@ static void annotateContainerTok(Token* tok, const DFContext& ctx) {
 // 6. mergeStates / mergeMemberStates / mergeContexts
 // ===========================================================================
 
+/// Merge two DFValues lists into a single de-duplicated Possible-only list.
+/// All values from both lists are downgraded to Possible, and only unique
+/// values (by equalValue) are kept.
+/// Used by mergeStates and mergeMemberStates to avoid duplicating the union
+/// logic.
+static DFValues mergeValueLists(const DFValues& vals1, const DFValues& vals2) {
+    DFValues merged;
+    for (const ValueFlow::Value& v : vals1) {
+        ValueFlow::Value pv = v;
+        pv.setPossible();
+        merged.push_back(pv);
+    }
+    for (const ValueFlow::Value& v : vals2) {
+        const bool dup = std::any_of(merged.begin(), merged.end(),
+                                     [&v](const ValueFlow::Value& m) {
+            return m.equalValue(v);
+        });
+        if (!dup) {
+            ValueFlow::Value pv = v;
+            pv.setPossible();
+            merged.push_back(pv);
+        }
+    }
+    return merged;
+}
+
 /// Merge two branch states at a join point (after if/else).
 ///
 /// Merge rules (requirement 3 — flow-sensitive, requirement 4 — no FP):
@@ -974,23 +1000,7 @@ static DFState mergeStates(const DFState& s1, const DFState& s2) {
         }
 
         // Otherwise: union of all values, all marked Possible
-        DFValues merged;
-        for (const ValueFlow::Value& v : vals1) {
-            ValueFlow::Value pv = v;
-            pv.setPossible();
-            merged.push_back(pv);
-        }
-        for (const ValueFlow::Value& v : vals2) {
-            const bool dup = std::any_of(merged.begin(), merged.end(),
-                                         [&v](const ValueFlow::Value& m) {
-                return m.equalValue(v);
-            });
-            if (!dup) {
-                ValueFlow::Value pv = v;
-                pv.setPossible();
-                merged.push_back(pv);
-            }
-        }
+        DFValues merged = mergeValueLists(vals1, vals2);
         if (!merged.empty())
             result[varId] = std::move(merged);
     }
@@ -1030,23 +1040,7 @@ static DFMemberState mergeMemberStates(const DFMemberState& s1,
             continue;
         }
 
-        DFValues merged;
-        for (const ValueFlow::Value& v : vals1) {
-            ValueFlow::Value pv = v;
-            pv.setPossible();
-            merged.push_back(pv);
-        }
-        for (const ValueFlow::Value& v : vals2) {
-            const bool dup = std::any_of(merged.begin(), merged.end(),
-                                         [&v](const ValueFlow::Value& m) {
-                return m.equalValue(v);
-            });
-            if (!dup) {
-                ValueFlow::Value pv = v;
-                pv.setPossible();
-                merged.push_back(pv);
-            }
-        }
+        DFValues merged = mergeValueLists(vals1, vals2);
         if (!merged.empty())
             result[key] = std::move(merged);
     }
@@ -1529,6 +1523,38 @@ static void collectRefOutVars(const Token* tok,
     }
 }
 
+/// Collect direct non-const reference arguments of the call at `callTok` and
+/// apply the standard out-parameter treatment:
+///   - mark address-taken (so the state-clear step won't preserve stale UNINIT)
+///   - add to callOutVars (so U2 re-injection is skipped for these vars)
+///   - erase from ctx.uninits (prevents re-injection by later unrelated calls)
+/// Used in both condition-level and statement-level call handlers.
+static void applyRefOutVars(const Token* callTok, DFContext& ctx,
+                             std::unordered_set<nonneg int>& callOutVars) {
+    std::unordered_set<nonneg int> refOutVars;
+    collectRefOutVars(callTok, refOutVars);
+    for (const nonneg int vid : refOutVars) {
+        ctx.addressTaken.insert(vid);
+        callOutVars.insert(vid);
+        ctx.uninits.erase(vid);
+    }
+}
+
+/// Clear all state entries that a called function could clobber.
+/// Local scalars whose address was never taken are safe and preserved.
+/// Member state is always conservatively cleared.
+/// Used in both condition-level and statement-level call handlers.
+static void clearCallClobberableState(DFContext& ctx) {
+    for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
+        const nonneg int varId = it->first;
+        if (ctx.localScalars.count(varId) && !ctx.addressTaken.count(varId))
+            ++it;  // safe local scalar — preserve
+        else
+            it = ctx.state.erase(it);
+    }
+    ctx.members.clear();
+}
+
 // Forward declaration — needed because if-branches recurse.
 static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 DFContext& ctx,
@@ -1724,27 +1750,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
                 // Requirement: also handle direct non-const reference arguments
                 // in condition-level function calls (same logic as site #1).
-                {
-                    std::unordered_set<nonneg int> refOutVars;
-                    collectRefOutVars(ct, refOutVars);
-                    for (const nonneg int vid : refOutVars) {
-                        ctx.addressTaken.insert(vid);  // force erasure of stale UNINIT
-                        callOutVars.insert(vid);        // skip UNINIT re-injection
-                        ctx.uninits.erase(vid);         // prevent future re-injection
-                    }
-                }
-
-                // Erase all variables that a callee could modify.
-                // Local scalars whose address was never taken are safe.
-                for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
-                    const nonneg int varId = it->first;
-                    if (ctx.localScalars.count(varId) &&
-                        !ctx.addressTaken.count(varId))
-                        ++it;  // safe local scalar — preserve
-                    else
-                        it = ctx.state.erase(it);
-                }
-                ctx.members.clear();
+                applyRefOutVars(ct, ctx, callOutVars);
+                clearCallClobberableState(ctx);
                 // Re-inject UNINIT(Possible) for variables in the uninit set.
                 // (mirrors the U2 logic in the statement-level call handler)
                 for (const nonneg int varId : ctx.uninits) {
@@ -2096,17 +2103,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // The callee may initialize such variables, so treat them the same
             // as address-taken out-pointer arguments: clear stale UNINIT state
             // and skip re-injection after the call.
-            {
-                std::unordered_set<nonneg int> refOutVars;
-                collectRefOutVars(tok, refOutVars);
-                for (const nonneg int vid : refOutVars) {
-                    ctx.addressTaken.insert(vid);  // Phase L: don't preserve stale UNINIT
-                    callOutVars.insert(vid);        // Phase U2: don't re-inject UNINIT
-                    // Remove from uninits so that subsequent unrelated function
-                    // calls do not re-inject UNINIT for this variable.
-                    ctx.uninits.erase(vid);
-                }
-            }
+            applyRefOutVars(tok, ctx, callOutVars);
 
             // Phase L: selectively clear state, preserving local scalars
             // whose address has not been taken.
@@ -2119,14 +2116,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             //
             // All other tracked variables (globals, pointers, references,
             // address-taken locals, member state) are conservatively cleared.
-            for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
-                const nonneg int varId = it->first;
-                if (ctx.localScalars.count(varId) && !ctx.addressTaken.count(varId))
-                    ++it;  // safe: local scalar, address not taken — preserve
-                else
-                    it = ctx.state.erase(it);
-            }
-            ctx.members.clear();
+            clearCallClobberableState(ctx);
             // Only clear container state for non-container-method calls.
             if (!isKnownContainerMethod)
                 ctx.containers.clear();
@@ -2440,6 +2430,45 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 /// the backward pass.
 ///
 /// Requirement 3 (flow-sensitive): assignments kill backward constraints.
+/// Apply a condition constraint backward into `state`.
+///
+/// Extracts value constraints from `condRoot` (via applyConditionConstraint),
+/// downgrades Known values to Possible (the branch may not always be taken),
+/// and merges the results into `state` without duplicates.
+///
+/// Used in two places in backwardAnalyzeBlock:
+///   1. The '}' handler when jumping backward past an if-block.
+///   2. The "if" keyword handler for tail-of-range if-blocks.
+static void mergeBackwardCondition(const Token* condRoot, DFState& state) {
+    DFState tmp;
+    // Phase MN: backward pass does not track member null state;
+    // a dummy member state is created locally and discarded.
+    DFMemberState dummyMembers;
+    applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
+    for (auto& kv : tmp) {
+        const nonneg int varId = kv.first;
+        DFValues& vals = kv.second;
+        // Known values become Possible — we don't know if the branch was
+        // always taken.  Impossible values stay Impossible (their semantics
+        // are preserved going backward).
+        for (ValueFlow::Value& v : vals)
+            if (v.isKnown())
+                v.setPossible();
+        auto it = state.find(varId);
+        if (it == state.end()) {
+            state[varId] = std::move(vals);
+        } else {
+            for (const ValueFlow::Value& v : vals) {
+                const bool dup = std::any_of(
+                    it->second.begin(), it->second.end(),
+                    [&v](const ValueFlow::Value& ex) { return ex.equalValue(v); });
+                if (!dup)
+                    it->second.push_back(v);
+            }
+        }
+    }
+}
+
 /// Requirement 4 (conservative): block boundaries are treated conservatively.
 /// Requirement 6 (fast): single backward pass, no iteration.
 ///
@@ -2500,37 +2529,8 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
                         // Going backward, we can only say the variable *possibly* had
                         // the constrained value (we don't know whether the branch ran).
                         const Token* condRoot = condOpen->astOperand2();
-                        if (condRoot) {
-                            DFState tmp;
-                            // Phase MN: backward pass does not track member null state;
-                            // dummy member state is created locally and discarded.
-                            DFMemberState dummyMembers;
-                            applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
-                            for (auto& kv : tmp) {
-                                const nonneg int varId = kv.first;
-                                DFValues& vals = kv.second;
-                                // Known values become Possible (we don't know if the
-                                // branch was always taken).  Impossible values stay
-                                // Impossible — their semantics are preserved going backward.
-                                for (ValueFlow::Value& v : vals)
-                                    if (v.isKnown())
-                                        v.setPossible();
-                                auto it = state.find(varId);
-                                if (it == state.end()) {
-                                    state[varId] = std::move(vals);
-                                } else {
-                                    for (const ValueFlow::Value& v : vals) {
-                                        const bool dup = std::any_of(
-                                            it->second.begin(), it->second.end(),
-                                            [&v](const ValueFlow::Value& ex) {
-                                            return ex.equalValue(v);
-                                        });
-                                        if (!dup)
-                                            it->second.push_back(v);
-                                    }
-                                }
-                            }
-                        }
+                        if (condRoot)
+                            mergeBackwardCondition(condRoot, state);
                         // Jump backward past the entire if-construct
                         // (keyword, condition parens, and block are all skipped)
                         tok = keyword;
@@ -2563,32 +2563,7 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
             if (!condRoot)
                 continue;
 
-            DFState tmp;
-            // Phase MN: backward pass does not track member null state;
-            // dummy member state is created locally and discarded.
-            DFMemberState dummyMembers;
-            applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
-            for (auto& kv : tmp) {
-                const nonneg int varId = kv.first;
-                DFValues& vals = kv.second;
-                // Known → Possible (branch may not always execute).
-                // Impossible stays Impossible (its meaning is preserved backward).
-                for (ValueFlow::Value& v : vals)
-                    if (v.isKnown())
-                        v.setPossible();
-                auto it = state.find(varId);
-                if (it == state.end()) {
-                    state[varId] = std::move(vals);
-                } else {
-                    for (const ValueFlow::Value& v : vals) {
-                        const bool dup = std::any_of(
-                            it->second.begin(), it->second.end(),
-                            [&v](const ValueFlow::Value& ex) { return ex.equalValue(v); });
-                        if (!dup)
-                            it->second.push_back(v);
-                    }
-                }
-            }
+            mergeBackwardCondition(condRoot, state);
             continue;
         }
 
