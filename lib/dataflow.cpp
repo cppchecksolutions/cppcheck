@@ -626,11 +626,54 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
 /// int/ptr constraint values from conditions.  Float variables will never
 /// have backward constraint entries, so the isTrackedFloatVar guard is
 /// effectively dead in the backward pass (but harmless).
+// Requirement: when the LHS subtree of a '&&' chain contains a direct
+// non-null guard for varId (the pointer variable itself), return true.
+// This handles chained && expressions such as "s && foo" appearing as the
+// LHS of a later "&&", e.g. "(s && foo) && s->x" — s is guarded even
+// though it is not the immediate LHS of the outer &&.
+// Conservative: only recognises the simple "variable itself" form of guard.
+static bool andLhsContainsVarGuard(const Token* lhs, nonneg int varId) {
+    if (!lhs)
+        return false;
+    // Direct non-null guard: the pointer variable itself.
+    if (lhs->varId() == varId && isTrackedPtrVar(lhs))
+        return true;
+    // Chained &&: recurse into both operands.
+    if (lhs->str() == "&&")
+        return andLhsContainsVarGuard(lhs->astOperand1(), varId) ||
+               andLhsContainsVarGuard(lhs->astOperand2(), varId);
+    return false;
+}
+
+// Forward declaration needed by orLhsContainsNullTest (defined below).
+static bool isNullTestCondition(const Token* cond, nonneg int varId);
+
+// Requirement: when the LHS subtree of a '||' chain contains a null-test for
+// varId (e.g. "!s", "s == 0", "s == nullptr"), then the RHS of the '||' is
+// only evaluated when the null-test is false, i.e. when the pointer is
+// non-null.  This handles chained || such as "!s || foo" appearing as the LHS
+// of a later "||", e.g. "(!s || foo) || s->x".
+// Conservative: delegates to isNullTestCondition for the leaf check.
+static bool orLhsContainsNullTest(const Token* lhs, nonneg int varId) {
+    if (!lhs)
+        return false;
+    // Direct null-test in the LHS: !s, s==0, etc.
+    if (isNullTestCondition(lhs, varId))
+        return true;
+    // Chained ||: recurse into both operands.
+    if (lhs->str() == "||")
+        return orLhsContainsNullTest(lhs->astOperand1(), varId) ||
+               orLhsContainsNullTest(lhs->astOperand2(), varId);
+    return false;
+}
+
 // Requirement: when a pointer token is evaluated on the RHS of a logical-AND
-// expression "lhs && rhs", and lhs is the same pointer variable, rhs executes
-// only when lhs is true. In that context the pointer is known non-null, so
-// nullable-zero annotations from loop-exit state must not be attached to rhs
-// uses (otherwise CheckNullPointer gets a false positive).
+// expression "lhs && rhs", and lhs (or any node in its && subtree) is the
+// same pointer variable, rhs executes only when the pointer is non-null.
+// Nullable-zero annotations from loop-exit state must not be attached to such
+// rhs uses (otherwise CheckNullPointer gets a false positive).
+// Example: "s && foo && s->x" — the outer && has LHS "s && foo"; the pointer
+// s appears in that subtree so s->x is guarded.
 static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
     if (!tok || tok->varId() == 0)
         return false;
@@ -642,8 +685,33 @@ static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
             continue;
         if (parent->astOperand2() != child)
             continue;
-        const Token* lhs = parent->astOperand1();
-        if (lhs && lhs->varId() == varId && isTrackedPtrVar(lhs))
+        // Use andLhsContainsVarGuard to handle chained && in the LHS.
+        if (andLhsContainsVarGuard(parent->astOperand1(), varId))
+            return true;
+    }
+    return false;
+}
+
+// Requirement: when a pointer token is evaluated on the RHS of a logical-OR
+// expression "lhs || rhs", and lhs (or any node in its || subtree) is a
+// null-test of the same pointer variable, rhs executes only when lhs is false,
+// i.e. only when the pointer is non-null.  Nullable-zero annotations from
+// loop-exit state must not be attached to such rhs uses.
+// Example: "!s || foo || s->x" — the outer || has LHS "!s || foo"; the
+// null-test !s appears in that subtree so s->x is guarded.
+static bool isRhsOfGuardedOrByNullTest(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+
+    const nonneg int varId = tok->varId();
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
+        if (parent->str() != "||")
+            continue;
+        if (parent->astOperand2() != child)
+            continue;
+        // Use orLhsContainsNullTest to handle chained || in the LHS.
+        if (orLhsContainsNullTest(parent->astOperand1(), varId))
             return true;
     }
     return false;
@@ -774,10 +842,11 @@ static void annotateTok(Token* tok, const DFState& state) {
         return;
 
     const bool guardedRhs        = isRhsOfGuardedAndBySameVar(tok);
+    const bool guardedOrRhs      = isRhsOfGuardedOrByNullTest(tok);
     const bool guardedTernary    = isInTrueBranchOfTernaryBySameVar(tok);
     const bool guardedNegTernary = isInFalseBranchOfNegatedTernaryBySameVar(tok);
     for (const ValueFlow::Value& val : it->second) {
-        if ((guardedRhs || guardedTernary || guardedNegTernary) && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+        if ((guardedRhs || guardedOrRhs || guardedTernary || guardedNegTernary) && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
             continue;
         tok->addValue(val);
     }

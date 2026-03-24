@@ -2316,6 +2316,48 @@ private:
                 return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
             }));
         }
+
+        // FP18: pointer dereference in a chained "!s || extra || s->field"
+        //       expression. The pointer s is null-tested by the first operand
+        //       of the || chain; s->b must NOT carry a nullable null value.
+        //       Regression: "while (s && s->a > 0) s = s->next;
+        //                    return !s || g || s->c == 0;"
+        {
+            const char code[] = "struct S { int a; int c; struct S* next; };\n"  // 1
+                                "int g;\n"                                         // 2
+                                "bool foo(struct S* s) {\n"                       // 3
+                                "  while (s && s->a > 0)\n"                       // 4
+                                "    s = s->next;\n"                              // 5
+                                "  return !s || g || s->c == 0;\n"                // 6
+                                "}\n";
+            // s->c on line 6 is only reached when s is non-null (!s is false,
+            // guarded by the first || operand). No nullable (non-impossible) null value.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . c");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
+
+        // FP17: pointer dereference in a chained "s && extra && s->field"
+        //       expression. The pointer s is guarded by the first operand of
+        //       the && chain; s->b must NOT carry a nullable null value.
+        //       Regression: "while (s && s->a > 0) s = s->next;
+        //                    return s && g && s->b == 0;"
+        {
+            const char code[] = "struct S { int a; int b; struct S* next; };\n"  // 1
+                                "int g;\n"                                         // 2
+                                "bool foo(struct S* s) {\n"                       // 3
+                                "  while (s && s->a > 0)\n"                       // 4
+                                "    s = s->next;\n"                              // 5
+                                "  return s && g && s->b == 0;\n"                 // 6
+                                "}\n";
+            // s->b on line 6 is only reached when s is non-null (guarded by
+            // the first && operand). No nullable (non-impossible) null value.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . b");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
     }
 };
 
