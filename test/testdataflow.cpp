@@ -1312,6 +1312,27 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 10));
         }
+
+        // U10: uninit pointer used inside an if-condition — Phase UA must
+        //      annotate condition tokens so checkers can detect the uninit use.
+        //      Reproduces the false negative in test1.cpp: bufToken is declared
+        //      without an initializer and then dereferenced via x->method() inside
+        //      an if-condition.  The main token-walker skips condition tokens, so
+        //      Phase UA must annotate them explicitly.
+        {
+            const char code[] = "struct S { int* f(); };\n"  // 1
+                                "void g();\n"                // 2
+                                "void foo() {\n"             // 3
+                                "  S *x;\n"                  // 4  ← uninit pointer
+                                "  if (g()) {\n"             // 5  ← empty branch; x not assigned
+                                "  } else {\n"               // 6
+                                "    return;\n"              // 7
+                                "  }\n"                      // 8
+                                "  if (!x->f())\n"           // 9  ← x must be UNINIT here
+                                "    return;\n"              // 10
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 9));
+        }
     }
 
     // -----------------------------------------------------------------------

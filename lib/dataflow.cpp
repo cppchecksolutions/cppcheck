@@ -1825,6 +1825,25 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
             }
 
+            // Phase UA: annotate variable reads in the if-condition.
+            //
+            // Requirement: The main token-walker never visits condition tokens —
+            // it advances tok to thenClose after handling the if-statement.
+            // Any variable read inside the condition is therefore missed by the
+            // normal annotateTok step in the main loop.  Annotate condition
+            // tokens here, AFTER passes 1/2 and U-SR have updated ctx (so
+            // function-call clearing and UNINIT re-injection are already done),
+            // so that checkers such as CheckUninitVar see UNINIT on uninitialized
+            // pointers that are dereferenced inside a condition.
+            for (Token* ct = const_cast<Token*>(parenOpen->next());
+                 ct && ct != parenClose; ct = ct->next()) {
+                if (ct->varId() > 0 && ct->isName()) {
+                    annotateTok(ct, ctx.state);
+                    annotateMemberTok(ct, ctx);
+                    annotateContainerTok(ct, ctx);
+                }
+            }
+
             // Fork: both branches start from the post-condition-call context.
             DFContext ctxThen = ctx;
             DFContext ctxElse = ctx;
