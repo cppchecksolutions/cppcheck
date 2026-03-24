@@ -1546,7 +1546,15 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
                 // Requirement: also handle direct non-const reference arguments
                 // in condition-level function calls (same logic as site #1).
-                collectRefOutVars(ct, callOutVars);
+                {
+                    std::unordered_set<nonneg int> refOutVars;
+                    collectRefOutVars(ct, refOutVars);
+                    for (const nonneg int vid : refOutVars) {
+                        ctx.addressTaken.insert(vid);  // force erasure of stale UNINIT
+                        callOutVars.insert(vid);        // skip UNINIT re-injection
+                        ctx.uninits.erase(vid);         // prevent future re-injection
+                    }
+                }
 
                 // Erase all variables that a callee could modify.
                 // Local scalars whose address was never taken are safe.

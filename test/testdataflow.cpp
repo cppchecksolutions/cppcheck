@@ -2166,6 +2166,24 @@ private:
             });
             ASSERT(!hasNullableZero);
         }
+
+        // FP14: bool passed by non-const reference in an if-condition call.
+        //       The callee may initialize x through the reference when it returns
+        //       true; x is only read in the then-branch, so there is no UNINIT FP.
+        //       Regression for lib/checkcondition.cpp:
+        //         bool not_;
+        //         if (parseComparison(tok, not_))
+        //             return not_;   ← false positive without fix
+        {
+            const char code[] = "bool parse(const void*, bool&);\n"  // 1
+                                "bool f(const void* tok) {\n"        // 2
+                                "  bool x;\n"                        // 3
+                                "  if (parse(tok, x))\n"             // 4
+                                "    return x;\n"                    // 5  must NOT be UNINIT
+                                "  return false;\n"                  // 6
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 };
 
