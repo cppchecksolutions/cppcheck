@@ -2121,7 +2121,11 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 
             if (!isIntVar && !isPtrVar && !isFloatVar) {
                 // Non-tracked variable type — erase stale entries and skip.
+                // Requirement: also clear container state so that a prior
+                // Known-empty state (e.g. from default construction) does not
+                // persist after the container is assigned a new value.
                 ctx.state.erase(varId);
+                ctx.containers.erase(varId);
                 continue;
             }
 

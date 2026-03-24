@@ -2274,6 +2274,33 @@ private:
             }));
         }
 
+        // FP17: std::string assigned in both branches of an if/else must NOT
+        //       keep the Known-empty container size from its default construction.
+        //       Regression for test1.cpp:11:
+        //         std::string errmsg;
+        //         if (cond) errmsg = "non-empty A";
+        //         else      errmsg = "non-empty B";
+        //         use(errmsg[0]);   <- false positive containerOutOfBounds
+        {
+            const char code[] = "#include <string>\n"                          // 1
+                                "void f(bool cond) {\n"                       // 2
+                                "  std::string x;\n"                          // 3
+                                "  if (cond)\n"                               // 4
+                                "    x = \"non-empty A\";\n"                  // 5
+                                "  else\n"                                     // 6
+                                "    x = \"non-empty B\";\n"                  // 7
+                                "  (void)x;\n"                                // 8
+                                "}\n";
+            // After both branches assign x, the Known-empty state must be gone.
+            // The container token must NOT carry a CONTAINER_SIZE value of 0.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "x", ValueFlow::Value::ValueType::CONTAINER_SIZE);
+            const bool hasEmptySize = std::any_of(values.cbegin(), values.cend(),
+                                                  [](const ValueFlow::Value& v) {
+                return v.isContainerSizeValue() && v.intvalue == 0 && !v.isImpossible();
+            });
+            ASSERT(!hasEmptySize);
+        }
+
         // FP16c: pointer in the false branch of "!(s!=0) ? 0 : s->field".
         //        !(non-null-test) is a null-test so the false branch is guarded.
         {
