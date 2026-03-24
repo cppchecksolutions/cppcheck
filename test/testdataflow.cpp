@@ -2184,6 +2184,111 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // FP15: pointer in the true branch of "s ? s->field : 0" after a
+        //       "while (s && s->field > 0)" loop.  The ternary condition already
+        //       null-checks s, so the dereference in the true branch must NOT
+        //       carry a nullable null value.
+        //       Regression for test1.cpp:11:
+        //         while (s && s->x > 0) s = s->next;
+        //         return s ? s->x : 0;          <- false positive nullPointer
+        {
+            const char code[] = "struct S { int x; struct S* next; };\n"  // 1
+                                "int foo(struct S* s) {\n"                // 2
+                                "  while (s && s->x > 0)\n"              // 3
+                                "    s = s->next;\n"                      // 4
+                                "  return s ? s->x : 0;\n"               // 5
+                                "}\n";
+            // s in the true branch is guarded by the ternary condition — must NOT
+            // carry a nullable (non-impossible) null value.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . x");
+            const bool hasNullableZero = std::any_of(values.cbegin(), values.cend(),
+                                                     [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            });
+            ASSERT(!hasNullableZero);
+        }
+
+        // FP16: pointer in the false branch of null-test ternary after a loop.
+        //       Covers !s, s==0, 0==s, s==nullptr forms.
+        //       Regression for test1.cpp:11:
+        //         while (s && s->x > 0) s = s->next;
+        //         x = !s ? 0 : s->x;         <- false positive nullPointer
+        //         x = (s==0 ? 0 : s->x);     <- false positive nullPointer
+        {
+            // FP16a: !s
+            const char code16a[] = "struct S { int x; struct S* next; };\n"  // 1
+                                   "void foo(struct S* s) {\n"               // 2
+                                   "  while (s && s->x > 0)\n"               // 3
+                                   "    s = s->next;\n"                       // 4
+                                   "  int x = !s ? 0 : s->x;\n"              // 5
+                                   "  (void)x;\n"                             // 6
+                                   "}\n";
+            const std::list<ValueFlow::Value> vals16a = tokenValues(code16a, "s . x");
+            ASSERT(!std::any_of(vals16a.cbegin(), vals16a.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
+        {
+            // FP16b: s==0
+            const char code16b[] = "struct S { int x; struct S* next; };\n"   // 1
+                                   "void foo(struct S* s) {\n"                // 2
+                                   "  while (s && s->x > 0)\n"               // 3
+                                   "    s = s->next;\n"                       // 4
+                                   "  int x = (s==0 ? 0 : s->x);\n"          // 5
+                                   "  (void)x;\n"                             // 6
+                                   "}\n";
+            const std::list<ValueFlow::Value> vals16b = tokenValues(code16b, "s . x");
+            ASSERT(!std::any_of(vals16b.cbegin(), vals16b.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
+
+        // FP15b: pointer in the true branch of "s!=0 ? s->field : 0".
+        //        s!=0 is a non-null-test so the true branch is guarded.
+        {
+            const char code[] = "struct S { int x; struct S* next; };\n"  // 1
+                                "int foo(struct S* s) {\n"                // 2
+                                "  while (s && s->x > 0)\n"              // 3
+                                "    s = s->next;\n"                      // 4
+                                "  return s!=0 ? s->x : 0;\n"            // 5
+                                "}\n";
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . x");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
+
+        // FP15c: pointer in the true branch of "!(s==0) ? s->field : 0".
+        //        !(null-test) is a non-null-test so the true branch is guarded.
+        {
+            const char code[] = "struct S { int x; struct S* next; };\n"   // 1
+                                "int foo(struct S* s) {\n"                 // 2
+                                "  while (s && s->x > 0)\n"               // 3
+                                "    s = s->next;\n"                       // 4
+                                "  return !(s==0) ? s->x : 0;\n"          // 5
+                                "}\n";
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . x");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
+
+        // FP16c: pointer in the false branch of "!(s!=0) ? 0 : s->field".
+        //        !(non-null-test) is a null-test so the false branch is guarded.
+        {
+            const char code[] = "struct S { int x; struct S* next; };\n"   // 1
+                                "void foo(struct S* s) {\n"                // 2
+                                "  while (s && s->x > 0)\n"               // 3
+                                "    s = s->next;\n"                       // 4
+                                "  int x = (!(s!=0) ? 0 : s->x);\n"       // 5
+                                "  (void)x;\n"                             // 6
+                                "}\n";
+            const std::list<ValueFlow::Value> values = tokenValues(code, "s . x");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(), [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
     }
 };
 

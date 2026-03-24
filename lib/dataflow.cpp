@@ -649,6 +649,113 @@ static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
     return false;
 }
 
+static bool isZeroValue(const Token* t) {
+    return t && t->hasKnownIntValue() && t->getKnownIntValue() == 0;
+}
+
+/// Returns true when `cond` is a null-test of `varId` — i.e. the condition
+/// is true exactly when the variable is null.  Covers:
+///   !p,  p == 0,  0 == p,  p == nullptr,  nullptr == p,  !(non-null-test)
+static bool isNullTestCondition(const Token* cond, nonneg int varId);
+static bool isNonNullTestCondition(const Token* cond, nonneg int varId);
+
+static bool isNullTestCondition(const Token* cond, nonneg int varId) {
+    if (!cond)
+        return false;
+    if (cond->str() == "!" && cond->astOperand1() &&
+        cond->astOperand1()->varId() == varId && isTrackedPtrVar(cond->astOperand1()))
+        return true;
+    if (cond->str() == "==") {
+        const Token* lhs = cond->astOperand1();
+        const Token* rhs = cond->astOperand2();
+        if (lhs && lhs->varId() == varId && isTrackedPtrVar(lhs) && isZeroValue(rhs))
+            return true;
+        if (rhs && rhs->varId() == varId && isTrackedPtrVar(rhs) && isZeroValue(lhs))
+            return true;
+    }
+    // !(non-null-test) is a null-test, e.g. !(s!=0)
+    if (cond->str() == "!" && isNonNullTestCondition(cond->astOperand1(), varId))
+        return true;
+    return false;
+}
+
+/// Returns true when `cond` is a non-null-test of `varId` — i.e. the condition
+/// is true exactly when the variable is non-null.  Covers:
+///   p,  p != 0,  0 != p,  p != nullptr,  nullptr != p,  !(null-test)
+static bool isNonNullTestCondition(const Token* cond, nonneg int varId) {
+    if (!cond)
+        return false;
+    if (cond->varId() == varId && isTrackedPtrVar(cond))
+        return true;
+    if (cond->str() == "!=") {
+        const Token* lhs = cond->astOperand1();
+        const Token* rhs = cond->astOperand2();
+        if (lhs && lhs->varId() == varId && isTrackedPtrVar(lhs) && isZeroValue(rhs))
+            return true;
+        if (rhs && rhs->varId() == varId && isTrackedPtrVar(rhs) && isZeroValue(lhs))
+            return true;
+    }
+    // !(null-test) is a non-null-test, e.g. !(s==0)
+    if (cond->str() == "!" && isNullTestCondition(cond->astOperand1(), varId))
+        return true;
+    return false;
+}
+
+/// Returns true when tok is in the true branch of a ternary where the
+/// condition is a non-null-test of the same pointer variable as tok.
+/// Covers: "p ? p->x : 0",  "p!=0 ? p->x : 0",  "0!=p ? p->x : 0", etc.
+/// In that context the pointer is known non-null, so nullable-zero annotations
+/// must not be attached (otherwise CheckNullPointer gets a false positive).
+static bool isInTrueBranchOfTernaryBySameVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+
+    const nonneg int varId = tok->varId();
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
+        if (parent->str() != ":")
+            continue;
+        // child must be the true branch (astOperand1 of ':'), not the false branch
+        if (parent->astOperand1() != child)
+            continue;
+        // ':' must be the rhs of a '?'
+        const Token* question = parent->astParent();
+        if (!question || question->str() != "?")
+            continue;
+        if (isNonNullTestCondition(question->astOperand1(), varId))
+            return true;
+    }
+    return false;
+}
+
+/// Returns true when tok is in the false branch of a ternary where the
+/// condition is a null-test of the same pointer variable as tok.
+/// Covers: "!p ? 0 : p->x",  "p==0 ? 0 : p->x",  "0==p ? 0 : p->x", etc.
+/// In that context the pointer is known non-null, so nullable-zero annotations
+/// must not be attached (otherwise CheckNullPointer gets a false positive).
+static bool isInFalseBranchOfNegatedTernaryBySameVar(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+
+    const nonneg int varId = tok->varId();
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
+        if (parent->str() != ":")
+            continue;
+        // child must be the false branch (astOperand2 of ':'), not the true branch
+        if (parent->astOperand2() != child)
+            continue;
+        // ':' must be the rhs of a '?'
+        const Token* question = parent->astParent();
+        if (!question || question->str() != "?")
+            continue;
+        // The condition of '?' must be a null-test of the same pointer variable
+        if (isNullTestCondition(question->astOperand1(), varId))
+            return true;
+    }
+    return false;
+}
+
 static void annotateTok(Token* tok, const DFState& state) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
@@ -666,9 +773,11 @@ static void annotateTok(Token* tok, const DFState& state) {
     if (it == state.end())
         return;
 
-    const bool guardedRhs = isRhsOfGuardedAndBySameVar(tok);
+    const bool guardedRhs        = isRhsOfGuardedAndBySameVar(tok);
+    const bool guardedTernary    = isInTrueBranchOfTernaryBySameVar(tok);
+    const bool guardedNegTernary = isInFalseBranchOfNegatedTernaryBySameVar(tok);
     for (const ValueFlow::Value& val : it->second) {
-        if (guardedRhs && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+        if ((guardedRhs || guardedTernary || guardedNegTernary) && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
             continue;
         tok->addValue(val);
     }
