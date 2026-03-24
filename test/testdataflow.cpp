@@ -2403,6 +2403,38 @@ private:
                 return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
             }));
         }
+
+        // FP19: container.empty() early-return guard inside a lambda.
+        //       The lambda captures a container by reference; inside the lambda
+        //       body "if (x.empty()) return false; return x.top() > 0;" the
+        //       x.top() use is guarded.  After the guard, x must NOT carry a
+        //       Known CONTAINER_SIZE=0 value.
+        //       Regression for test2.cpp:
+        //         std::stack<...> endInitList;
+        //         auto inInitList = [&] {
+        //             if (endInitList.empty()) return false;          // line 9
+        //             return endInitList.top().second == scope;       // line 11
+        //         };
+        {
+            // No #include — line numbers stay stable; std.cfg provides container info.
+            const char code[] = "void f() {\n"                               // 1
+                                "  std::stack<int> x;\n"                     // 2
+                                "  auto lam = [&] {\n"                       // 3
+                                "    if (x.empty())\n"                       // 4
+                                "      return false;\n"                      // 5
+                                "    return x.top() > 0;\n"                  // 6
+                                "  };\n"                                     // 7
+                                "  (void)lam;\n"                             // 8
+                                "}\n";
+            const Settings containerSettings =
+                settingsBuilder().checkLevel(Settings::CheckLevel::normal)
+                                 .library("std.cfg")
+                                 .build();
+            // After the guard, x at line 6 must NOT have a Known CONTAINER_SIZE=0.
+            // Before the fix this was a false positive: the dataflow analysis
+            // carried the Known-empty state through the early-return guard.
+            ASSERT(!testContainerSizeKnown(code, 6, 0, containerSettings));
+        }
     }
 };
 

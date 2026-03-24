@@ -1181,6 +1181,7 @@ static bool blockTerminates(const Token* start, const Token* end) {
 static void applyConditionConstraint(const Token* condRoot,
                                      DFState& state,
                                      DFMemberState& members,
+                                     DFContState& containers,
                                      bool branchTaken) {
     if (!condRoot)
         return;
@@ -1217,6 +1218,23 @@ static void applyConditionConstraint(const Token* condRoot,
             else
                 nullVal.setImpossible();
             members[{objId, fieldId}] = {nullVal};
+        }
+
+        // Phase C: "!x.empty()" — negated container-empty condition.
+        // AST: '!' → '(' → '.' → operand1 (container var), operand2 'empty'
+        //   branchTaken=true:  !x.empty() is true  → x is non-empty → erase Known-zero
+        //   branchTaken=false: !x.empty() is false → x is empty     → keep Known-zero
+        else if (operand->str() == "(" && operand->astOperand1()) {
+            const Token* funcExpr = operand->astOperand1();
+            if (funcExpr->str() == "."          &&
+                funcExpr->astOperand1()          &&
+                funcExpr->astOperand2()          &&
+                funcExpr->astOperand2()->str() == "empty" &&
+                isTrackedContainerVar(funcExpr->astOperand1())) {
+                if (branchTaken)
+                    containers.erase(funcExpr->astOperand1()->varId());
+                // branchTaken=false: x.empty() is true, keep Known-zero state.
+            }
         }
 
         return;
@@ -1260,10 +1278,33 @@ static void applyConditionConstraint(const Token* condRoot,
     // -----------------------------------------------------------------
     if (condRoot->str() == "&&") {
         if (branchTaken) {
-            applyConditionConstraint(condRoot->astOperand1(), state, members, true);
-            applyConditionConstraint(condRoot->astOperand2(), state, members, true);
+            applyConditionConstraint(condRoot->astOperand1(), state, members, containers, true);
+            applyConditionConstraint(condRoot->astOperand2(), state, members, containers, true);
         }
         return;
+    }
+
+    // -----------------------------------------------------------------
+    // Phase C: "x.empty()" — direct container-empty condition.
+    // AST for "x.empty()": '(' call → astOperand1 '.' → astOperand1 'x'
+    //                                                  → astOperand2 'empty'
+    //   branchTaken=true:  x.empty() is true  → x is empty → keep Known-zero
+    //   branchTaken=false: x.empty() is false → x is non-empty →
+    //       erase the Known-zero size to prevent false containerOutOfBounds
+    //       reports on subsequent accesses such as top()/front()/back().
+    // -----------------------------------------------------------------
+    if (condRoot->str() == "(" && condRoot->astOperand1()) {
+        const Token* funcExpr = condRoot->astOperand1();
+        if (funcExpr->str() == "."          &&
+            funcExpr->astOperand1()          &&
+            funcExpr->astOperand2()          &&
+            funcExpr->astOperand2()->str() == "empty" &&
+            isTrackedContainerVar(funcExpr->astOperand1())) {
+            if (!branchTaken)
+                containers.erase(funcExpr->astOperand1()->varId());
+            // branchTaken=true: x.empty() is true, keep Known-zero state.
+            return;
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1851,9 +1892,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Apply the if-condition constraint inside the then-block.
             // condRoot is the AST root of the condition expression.
             const Token* condRoot = parenOpen->astOperand2();
-            // Phase MN: also pass member state so member pointer conditions are handled.
-            applyConditionConstraint(condRoot, ctxThen.state, ctxThen.members, /*branchTaken=*/true);
-            applyConditionConstraint(condRoot, ctxElse.state, ctxElse.members, /*branchTaken=*/false);
+            // Phase MN/C: also pass member and container state so member pointer
+            // and container.empty() conditions are handled.
+            applyConditionConstraint(condRoot, ctxThen.state, ctxThen.members, ctxThen.containers, /*branchTaken=*/true);
+            applyConditionConstraint(condRoot, ctxElse.state, ctxElse.members, ctxElse.containers, /*branchTaken=*/false);
 
             // Analyse the then-block.
             forwardAnalyzeBlock(const_cast<Token*>(thenOpen->next()), thenClose,
@@ -1965,6 +2007,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                             // Simple "while (p)": loop exits iff p is null.
                             applyConditionConstraint(condRoot, ctx.state,
                                                      ctx.members,
+                                                     ctx.containers,
                                                      /*branchTaken=*/false);
                         } else if (condRoot->str() == "&&") {
                             // AND-chain: each null-guard pointer is Possible null.
@@ -2027,6 +2070,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 // Simple "do { } while (p)": exits iff p is null.
                                 applyConditionConstraint(condRoot, ctx.state,
                                                          ctx.members,
+                                                         ctx.containers,
                                                          /*branchTaken=*/false);
                             } else if (condRoot->str() == "&&") {
                                 // AND-chain: p might be null on exit → Possible null.
@@ -2504,8 +2548,11 @@ static void mergeBackwardCondition(const Token* condRoot, DFState& state) {
     DFState tmp;
     // Phase MN: backward pass does not track member null state;
     // a dummy member state is created locally and discarded.
+    // Phase C: backward pass does not track container state either;
+    // a dummy container state is created locally and discarded.
     DFMemberState dummyMembers;
-    applyConditionConstraint(condRoot, tmp, dummyMembers, /*branchTaken=*/true);
+    DFContState dummyContainers;
+    applyConditionConstraint(condRoot, tmp, dummyMembers, dummyContainers, /*branchTaken=*/true);
     for (auto& kv : tmp) {
         const nonneg int varId = kv.first;
         DFValues& vals = kv.second;
