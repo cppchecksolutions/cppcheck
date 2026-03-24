@@ -1572,6 +1572,25 @@ static void collectRefOutVars(const Token* tok,
 {
     if (!tok || !tok->previous())
         return;
+
+    // Requirement: std::tie() takes all its arguments by non-const lvalue reference
+    // and assigns to them when the returned tuple is assigned (e.g. via operator=).
+    // The Function* for std::tie is not available (it is a standard library template),
+    // so we handle it explicitly: every plain variable argument is an out-parameter.
+    if (Token::simpleMatch(tok->previous()->tokAt(-2), "std :: tie")) {
+        for (const Token* argTok = tok->next();
+             argTok && argTok != tok->link();
+             argTok = argTok->next()) {
+            if (argTok->str() == "(" && argTok->link()) {
+                argTok = argTok->link();
+                continue;
+            }
+            if (argTok->varId() > 0 && argTok->isName())
+                out.insert(argTok->varId());
+        }
+        return;
+    }
+
     // Look up the Function object from the declaration.
     const Function* func = tok->previous()->function();
     if (!func)

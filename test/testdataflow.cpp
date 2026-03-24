@@ -1540,6 +1540,19 @@ private:
             ASSERT(testValueOfXUninit(code, 4));
             ASSERT(testValueOfXUninit(code, 5));
         }
+
+        // U2.4: variable assigned via std::tie must NOT be UNINIT after the assignment.
+        //       std::tie takes its arguments by non-const lvalue reference — the callee
+        //       writes back through those references, so the variables are initialized.
+        {
+            const char code[] = "std::pair<bool,bool> evalCond();\n"  // 1
+                                "void f() {\n"                         // 2
+                                "  bool x, y;\n"                       // 3
+                                "  std::tie(x, y) = evalCond();\n"    // 4
+                                "  (void)x;\n"                         // 5  ← NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 
     // -----------------------------------------------------------------------
