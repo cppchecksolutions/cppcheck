@@ -1467,6 +1467,39 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // U18 (FP): variable initialized via &var argument to a function call
+        //           inside a while condition must NOT be reported as UNINIT.
+        //           The while condition executes at least once, so the callee
+        //           definitely writes the variable before it is used after the loop.
+        //           Reproduces: "double start; while(sscanf(...,&start,...)!=2){};"
+        //           falsely reports start as UNINIT after the loop.
+        {
+            const char code[] = "int scan(const char *s, double *out);\n"  // 1
+                                "void f() {\n"                              // 2
+                                "  double x;\n"                             // 3  ← declared without init
+                                "  while (scan(\"s\", &x) != 1) {}\n"      // 4  ← &x initializes x
+                                "  (void)x;\n"                              // 5  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
+
+        // U19 (FP): variable initialized via &var argument to a function call
+        //           inside a do-while condition must NOT be reported as UNINIT.
+        //           The do-while condition executes at least once, so the callee
+        //           definitely writes the variable before it is used after the loop.
+        //           Reproduces: "double start; do {} while(sscanf(...,&start,...)!=2);"
+        //           falsely reports start as UNINIT at "current->start = start * 100".
+        {
+            const char code[] = "int scan(const char *s, double *out);\n"  // 1
+                                "void f() {\n"                              // 2
+                                "  double x;\n"                             // 3  ← declared without init
+                                "  do {\n"                                  // 4
+                                "  } while (scan(\"s\", &x) != 1);\n"      // 5  ← &x initializes x
+                                "  (void)x;\n"                              // 6  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 
     // -----------------------------------------------------------------------

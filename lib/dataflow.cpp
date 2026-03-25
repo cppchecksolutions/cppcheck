@@ -1754,6 +1754,37 @@ static void clearCallClobberableState(DFContext& ctx) {
     ctx.members.clear();
 }
 
+/// Remove from ctx.uninits and ctx.state every variable that is definitely
+/// initialized by a function call inside the loop condition [condOpen, condClose).
+///
+/// Used for both while and do-while conditions, which each execute at least
+/// once before the loop exits.  Any variable passed as '&var' (address-of),
+/// or as a non-const lvalue reference parameter, is definitely written by the
+/// callee on that first execution.
+///
+/// Phase U-WC2: clears stale UNINIT so that reads after the loop are not
+/// falsely flagged as uninitialized.
+static void clearConditionOutVars(const Token* condOpen, const Token* condClose,
+                                  DFContext& ctx) {
+    for (const Token* ct = condOpen->next(); ct && ct != condClose; ct = ct->next()) {
+        if (ct->isUnaryOp("&")) {
+            const Token* operand = ct->astOperand1();
+            if (operand && operand->varId() > 0) {
+                ctx.uninits.erase(operand->varId());
+                ctx.state.erase(operand->varId());
+            }
+        }
+        if (isFunctionCallOpen(ct)) {
+            std::unordered_set<nonneg int> refOutVars;
+            collectRefOutVars(ct, refOutVars);
+            for (const nonneg int vid : refOutVars) {
+                ctx.uninits.erase(vid);
+                ctx.state.erase(vid);
+            }
+        }
+    }
+}
+
 // Forward declaration — needed because if-branches recurse.
 static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 DFContext& ctx,
@@ -2144,6 +2175,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                             ctx.state.erase(varId);
                         }
                     }
+                    // Phase U-WC2: &var and non-const reference args in function
+                    // calls inside the while condition initialize the variable
+                    // unconditionally — the condition runs at least once.
+                    clearConditionOutVars(condOpen, condClose, ctx);
                 }
 
                 if (tok->str() == "for") {
@@ -2309,6 +2344,11 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     const Token* wCondClose = wCond->link();
                     if (wCondClose && wCondClose->next()) {
                         tok = const_cast<Token*>(wCondClose->next()); // points to ";"
+
+                        // Phase U-WC2: the do-while condition executes at least once,
+                        // so &var and non-const reference args in function calls
+                        // inside it initialize the variable unconditionally.
+                        clearConditionOutVars(wCond, wCondClose, ctx);
 
                         // Inject null constraints on do-while loop exit
                         // (same logic as the regular while handler above).
