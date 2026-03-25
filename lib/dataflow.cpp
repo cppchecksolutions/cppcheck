@@ -721,54 +721,42 @@ static bool orLhsContainsNullTest(const Token* lhs, nonneg int varId) {
     return false;
 }
 
-// Requirement: when a pointer token is evaluated on the RHS of a logical-AND
-// expression "lhs && rhs", and lhs (or any node in its && subtree) is the
-// same pointer variable, rhs executes only when the pointer is non-null.
-// Nullable-zero annotations from loop-exit state must not be attached to such
-// rhs uses (otherwise CheckNullPointer gets a false positive).
-// Example: "s && foo && s->x" — the outer && has LHS "s && foo"; the pointer
-// s appears in that subtree so s->x is guarded.
-static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
+/// Walk up the AST parent chain looking for a binary operator node `op`
+/// ("&&" or "||") where tok is on the right-hand side and the left-hand side
+/// satisfies `lhsCheck(lhs, varId)`.  Returns true if such a node is found.
+///
+/// Used to suppress false-positive nullable annotations when the pointer is
+/// already guarded by a preceding short-circuit check in the same expression
+/// (Requirement 4).  The `LhsCheck` template parameter avoids std::function
+/// overhead; it is instantiated with andLhsContainsVarGuard or
+/// orLhsContainsNullTest below.
+template<typename LhsCheck>
+static bool isRhsOfChainedOp(const Token* tok, const char* op, LhsCheck lhsCheck) {
     if (!tok || tok->varId() == 0)
         return false;
-
     const nonneg int varId = tok->varId();
     const Token* child = tok;
     for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
-        if (parent->str() != "&&")
+        if (parent->str() != op)
             continue;
         if (parent->astOperand2() != child)
             continue;
-        // Use andLhsContainsVarGuard to handle chained && in the LHS.
-        if (andLhsContainsVarGuard(parent->astOperand1(), varId))
+        if (lhsCheck(parent->astOperand1(), varId))
             return true;
     }
     return false;
 }
 
-// Requirement: when a pointer token is evaluated on the RHS of a logical-OR
-// expression "lhs || rhs", and lhs (or any node in its || subtree) is a
-// null-test of the same pointer variable, rhs executes only when lhs is false,
-// i.e. only when the pointer is non-null.  Nullable-zero annotations from
-// loop-exit state must not be attached to such rhs uses.
-// Example: "!s || foo || s->x" — the outer || has LHS "!s || foo"; the
-// null-test !s appears in that subtree so s->x is guarded.
-static bool isRhsOfGuardedOrByNullTest(const Token* tok) {
-    if (!tok || tok->varId() == 0)
-        return false;
+/// Returns true when tok is on the RHS of a "&&" chain whose LHS guards
+/// the same pointer variable (e.g. "s && foo && s->x" — s->x is safe).
+static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
+    return isRhsOfChainedOp(tok, "&&", andLhsContainsVarGuard);
+}
 
-    const nonneg int varId = tok->varId();
-    const Token* child = tok;
-    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
-        if (parent->str() != "||")
-            continue;
-        if (parent->astOperand2() != child)
-            continue;
-        // Use orLhsContainsNullTest to handle chained || in the LHS.
-        if (orLhsContainsNullTest(parent->astOperand1(), varId))
-            return true;
-    }
-    return false;
+/// Returns true when tok is on the RHS of a "||" chain whose LHS contains
+/// a null-test for the same variable (e.g. "!s || foo || s->x" — s->x is safe).
+static bool isRhsOfGuardedOrByNullTest(const Token* tok) {
+    return isRhsOfChainedOp(tok, "||", orLhsContainsNullTest);
 }
 
 /// Returns true when tok carries a Known integer value of zero.
@@ -1006,8 +994,7 @@ static void annotateContainerTok(Token* tok, const DFContext& ctx) {
 /// Merge two DFValues lists into a single de-duplicated Possible-only list.
 /// All values from both lists are downgraded to Possible, and only unique
 /// values (by equalValue) are kept.
-/// Used by mergeStates and mergeMemberStates to avoid duplicating the union
-/// logic.
+/// Used by mergeValueMaps (and therefore mergeStates / mergeMemberStates).
 static DFValues mergeValueLists(const DFValues& vals1, const DFValues& vals2) {
     DFValues merged;
     for (const ValueFlow::Value& v : vals1) {
@@ -1029,34 +1016,25 @@ static DFValues mergeValueLists(const DFValues& vals1, const DFValues& vals2) {
     return merged;
 }
 
-/// Merge two branch states at a join point (after if/else).
+/// Shared merge logic for any value-map type (DFState, DFMemberState,
+/// DFContState).  Implements the branch-join rules (Requirements 3, 4):
 ///
-/// Merge rules (requirement 3 — flow-sensitive, requirement 4 — no FP):
+///  SAME Known value on both paths   → result is Known (certainty preserved).
+///  SAME Impossible value both paths → result is Impossible (preserved, Req 4).
+///  Otherwise                        → union of all values, all Possible.
+///  Key present on only ONE path     → dropped (conservative, Requirement 4).
 ///
-///  SAME value on both paths → result is Known (certainty preserved).
-///    Example: if/else both assign x=1 → after merge x is Known 1.
-///
-///  DIFFERENT values on the two paths → result is all values marked Possible.
-///    Example: then assigns x=1, else assigns x=2 → after merge
-///    x has {1 Possible, 2 Possible}.
-///
-///  Variable present on only ONE path → dropped from the merged state.
-///    Conservative: we cannot make any claim about the variable's value after
-///    the merge because we don't know which path was taken.
-///    Example: x=5 set before the if; only then-branch modifies x →
-///    after merge x has {5 Possible, new_value Possible}.
-///    (The original value comes in as stateElse from the caller.)
-///
-/// Used for both DFState and DFContState (they share the same underlying type).
-static DFState mergeStates(const DFState& s1, const DFState& s2) {
-    DFState result;
-
+/// Templated on the map type so it works for both varId-keyed maps (DFState /
+/// DFContState) and DFMemberKey-keyed maps (DFMemberState) without duplication.
+template<typename Map>
+static Map mergeValueMaps(const Map& s1, const Map& s2) {
+    Map result;
     for (const auto& kv1 : s1) {
-        const nonneg int varId = kv1.first;
+        const auto& key   = kv1.first;
         const DFValues& vals1 = kv1.second;
-        const auto it2 = s2.find(varId);
+        const auto it2 = s2.find(key);
         if (it2 == s2.end())
-            continue;  // only in s1 → drop (conservative)
+            continue;  // only in s1 → drop (conservative, Requirement 4)
 
         const DFValues& vals2 = it2->second;
 
@@ -1064,71 +1042,42 @@ static DFState mergeStates(const DFState& s1, const DFState& s2) {
         if (vals1.size() == 1 && vals2.size() == 1 &&
             vals1[0].isKnown() && vals2[0].isKnown() &&
             vals1[0].equalValue(vals2[0])) {
-            result[varId] = vals1;
+            result[key] = vals1;
             continue;
         }
 
-        // Requirement (Phase N): if either path has Impossible(0) on a pointer,
-        // it means "definitely not null" on that path. Preserve the Impossible
-        // value in the merge to prevent false positives from conservative analysis.
-        // Example: if (!ptr) { return; } else { ... }
-        //   Then-path (unreachable): ptr = Known(0)
-        //   Else-path (surviving): ptr = Impossible(0)
-        // Merging Known(0) with Impossible(0) should NOT produce Possible(0)
-        // because the surviving path definitely has non-null ptr.
+        // Identical Impossible value on both paths → keep as Impossible.
+        // Requirement (Phases N, MN): Impossible(0) means "definitely not null";
+        // merging it with any non-Impossible value must not produce Possible(0)
+        // because the surviving path still definitely has a non-null pointer.
         if (vals1.size() == 1 && vals2.size() == 1 &&
             vals1[0].isImpossible() && vals2[0].isImpossible() &&
             vals1[0].equalValue(vals2[0])) {
-            result[varId] = vals1;  // Keep Impossible(0) on both paths
+            result[key] = vals1;
             continue;
         }
 
         // Otherwise: union of all values, all marked Possible
         DFValues merged = mergeValueLists(vals1, vals2);
         if (!merged.empty())
-            result[varId] = std::move(merged);
+            result[key] = std::move(merged);
     }
-    // Variables only in s2 are also dropped (symmetric — see above).
+    // Keys only in s2 are also dropped (symmetric — Requirement 4).
     return result;
+}
+
+/// Merge two branch states at a join point after if/else (Requirement 3).
+/// Delegates to mergeValueMaps which implements the shared merge rules.
+static DFState mergeStates(const DFState& s1, const DFState& s2) {
+    return mergeValueMaps(s1, s2);
 }
 
 /// Phase M: merge two DFMemberState instances.
 /// Uses the same rules as mergeStates() but keyed on DFMemberKey.
+/// Delegates to the shared mergeValueMaps template.
 static DFMemberState mergeMemberStates(const DFMemberState& s1,
                                        const DFMemberState& s2) {
-    DFMemberState result;
-
-    for (const auto& kv1 : s1) {
-        const DFMemberKey& key = kv1.first;
-        const DFValues& vals1 = kv1.second;
-        const auto it2 = s2.find(key);
-        if (it2 == s2.end())
-            continue;
-
-        const DFValues& vals2 = it2->second;
-
-        if (vals1.size() == 1 && vals2.size() == 1 &&
-            vals1[0].isKnown() && vals2[0].isKnown() &&
-            vals1[0].equalValue(vals2[0])) {
-            result[key] = vals1;
-            continue;
-        }
-
-        // Requirement (Phase MN): preserve Impossible values during merge to
-        // prevent false positives on member pointer fields. Same logic as
-        // mergeStates for simple variables.
-        if (vals1.size() == 1 && vals2.size() == 1 &&
-            vals1[0].isImpossible() && vals2[0].isImpossible() &&
-            vals1[0].equalValue(vals2[0])) {
-            result[key] = vals1;  // Keep Impossible value
-            continue;
-        }
-
-        DFValues merged = mergeValueLists(vals1, vals2);
-        if (!merged.empty())
-            result[key] = std::move(merged);
-    }
-    return result;
+    return mergeValueMaps(s1, s2);
 }
 
 /// Merge two full DFContext instances at a branch join point.
@@ -1631,77 +1580,97 @@ static void collectWhileExitConstraints(const Token* cond,
 }
 
 
+/// Apply null constraints for the exit of a loop whose condition is `condRoot`
+/// (Phase NW, Requirement 1).  When the loop exits, its condition was false:
+///   Simple pointer truth-test "while (p)" → p is Known null on exit.
+///   AND-chain "while (p && …)"            → each guarded pointer is Possible null.
+///
+/// Factored out of the while and do-while handlers to avoid duplication.
+static void applyLoopExitConstraints(const Token* condRoot, DFContext& ctx) {
+    if (!condRoot)
+        return;
+    if (isTrackedPtrVar(condRoot)) {
+        // Simple "while (p)": loop exits iff p is null.
+        applyConditionConstraint(condRoot, ctx.state, ctx.members,
+                                 ctx.containers, /*branchTaken=*/false);
+    } else if (condRoot->str() == "&&") {
+        // AND-chain: each null-guard pointer is Possible null on exit.
+        collectWhileExitConstraints(condRoot, ctx.state);
+    }
+}
+
+
 // ===========================================================================
 // 10. forwardAnalyzeBlock (Pass 1)
 // ===========================================================================
 
-// Collect varIds of variables that a function call may initialize via
-// non-const lvalue reference parameters.
-//
-// Requirement: when the called function's declaration is visible and a
-// parameter is a non-const lvalue reference (e.g. "int&"), the corresponding
-// argument variable may be written through that reference.  We must not
-// re-inject UNINIT for it after the call — same treatment as &var (pointer
-// out-parameters).
-//
-// tok   — the opening '(' of the function call
-// out   — set to receive the varIds of reference-out arguments
+/// Walk the argument tokens of the function call opened at `callOpen`.
+/// For each top-level plain variable token (skipping nested parenthesised
+/// groups) invoke `callback(argTok, argIndex)` where argIndex is 0-based.
+///
+/// Factors out the paren-skipping loop that was duplicated in both branches
+/// of collectRefOutVars.
+template<typename Callback>
+static void forEachCallArg(const Token* callOpen, Callback callback) {
+    nonneg int argIndex = 0;
+    for (const Token* argTok = callOpen->next();
+         argTok && argTok != callOpen->link();
+         argTok = argTok->next()) {
+        // Skip nested groups (inner calls, casts, …) — commas inside them
+        // must not advance our argument counter.
+        if (argTok->str() == "(" && argTok->link()) {
+            argTok = argTok->link();
+            continue;
+        }
+        if (argTok->str() == ",") {
+            ++argIndex;
+            continue;
+        }
+        if (argTok->varId() > 0 && argTok->isName())
+            callback(argTok, argIndex);
+    }
+}
+
+/// Collect varIds of variables that a function call may initialize via
+/// non-const lvalue reference parameters (Requirement 2 / Phase U2).
+///
+/// When the called function's declaration is visible and a parameter is a
+/// non-const lvalue reference (e.g. "int&"), the corresponding argument
+/// variable may be written through that reference.  We must not re-inject
+/// UNINIT for it after the call.
+///
+/// tok — the opening '(' of the function call
+/// out — set to receive the varIds of reference-out arguments
 static void collectRefOutVars(const Token* tok,
                                std::unordered_set<nonneg int>& out)
 {
     if (!tok || !tok->previous())
         return;
 
-    // Requirement: std::tie() takes all its arguments by non-const lvalue reference
-    // and assigns to them when the returned tuple is assigned (e.g. via operator=).
-    // The Function* for std::tie is not available (it is a standard library template),
-    // so we handle it explicitly: every plain variable argument is an out-parameter.
+    // std::tie() takes all its arguments by non-const lvalue reference and
+    // assigns to them when the returned tuple is assigned.  The Function*
+    // for std::tie is unavailable (standard library template), so handle
+    // it explicitly: every plain variable argument is an out-parameter.
     if (Token::simpleMatch(tok->previous()->tokAt(-2), "std :: tie")) {
-        for (const Token* argTok = tok->next();
-             argTok && argTok != tok->link();
-             argTok = argTok->next()) {
-            if (argTok->str() == "(" && argTok->link()) {
-                argTok = argTok->link();
-                continue;
-            }
-            if (argTok->varId() > 0 && argTok->isName())
-                out.insert(argTok->varId());
-        }
+        forEachCallArg(tok, [&out](const Token* argTok, nonneg int /*argIndex*/) {
+            out.insert(argTok->varId());
+        });
         return;
     }
 
-    // Look up the Function object from the declaration.
+    // General case: look up the Function object and check each parameter.
     const Function* func = tok->previous()->function();
     if (!func)
         return;  // no declaration visible — conservative: do nothing
 
-    nonneg int argIndex = 0;
-    for (const Token* argTok = tok->next();
-         argTok && argTok != tok->link();
-         argTok = argTok->next()) {
-
-        // Skip nested parenthesized groups (inner calls, casts, etc.) so
-        // that commas inside them do not advance our argument counter.
-        if (argTok->str() == "(" && argTok->link()) {
-            argTok = argTok->link();
-            continue;
-        }
-        // Top-level comma: advance to next argument.
-        if (argTok->str() == ",") {
-            ++argIndex;
-            continue;
-        }
-        // Plain variable token at the current argument position.
-        if (argTok->varId() > 0 && argTok->isName()) {
-            const Variable* param = func->getArgumentVar(argIndex);
-            // Requirement: only non-const lvalue references are out-parameters.
-            // Const references are read-only; rvalue references are not written
-            // back to the caller's variable.
-            if (param && param->isReference() &&
-                !param->isConst() && !param->isRValueReference())
-                out.insert(argTok->varId());
-        }
-    }
+    // Requirement: only non-const lvalue references are out-parameters.
+    // Const references are read-only; rvalue references are not written back.
+    forEachCallArg(tok, [&out, func](const Token* argTok, nonneg int argIndex) {
+        const Variable* param = func->getArgumentVar(argIndex);
+        if (param && param->isReference() &&
+            !param->isConst() && !param->isRValueReference())
+            out.insert(argTok->varId());
+    });
 }
 
 /// Collect direct non-const reference arguments of the call at `callTok` and
@@ -1718,6 +1687,28 @@ static void applyRefOutVars(const Token* callTok, DFContext& ctx,
         ctx.addressTaken.insert(vid);
         callOutVars.insert(vid);
         ctx.uninits.erase(vid);
+    }
+}
+
+/// Re-inject UNINIT(Possible) into ctx.state for every variable in
+/// ctx.uninits that is not listed in callOutVars (Requirement 2 / Phase U2).
+///
+/// Called after every function call to ensure that variables declared
+/// without an initializer remain visible as possibly-uninitialized even
+/// after the main state has been cleared by clearCallClobberableState.
+/// Variables in callOutVars were identified as out-parameters of this
+/// specific call, so they should not be flagged.
+///
+/// Used in both the condition-level and statement-level call handlers.
+static void reinjectUninitAfterCall(DFContext& ctx,
+                                     const std::unordered_set<nonneg int>& callOutVars) {
+    for (const nonneg int varId : ctx.uninits) {
+        if (callOutVars.count(varId))
+            continue;
+        ValueFlow::Value u;
+        u.valueType = ValueFlow::Value::ValueType::UNINIT;
+        u.setPossible();
+        ctx.state[varId] = {u};
     }
 }
 
@@ -1940,16 +1931,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 // in condition-level function calls (same logic as site #1).
                 applyRefOutVars(ct, ctx, callOutVars);
                 clearCallClobberableState(ctx);
-                // Re-inject UNINIT(Possible) for variables in the uninit set.
-                // (mirrors the U2 logic in the statement-level call handler)
-                for (const nonneg int varId : ctx.uninits) {
-                    if (callOutVars.count(varId))
-                        continue;
-                    ValueFlow::Value u;
-                    u.valueType = ValueFlow::Value::ValueType::UNINIT;
-                    u.setPossible();
-                    ctx.state[varId] = {u};
-                }
+                // Re-inject UNINIT(Possible) for uninit variables (Phase U2).
+                reinjectUninitAfterCall(ctx, callOutVars);
                 // Skip to the matching ')' to avoid processing inner/nested
                 // function calls separately — the outer call's clearing
                 // already covers all variables they could modify.
@@ -2164,16 +2147,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 if (condOpen && condOpen->str() == "(") {
                     const Token* condRoot = condOpen->astOperand2();
                     if (condRoot) {
-                        if (isTrackedPtrVar(condRoot)) {
-                            // Simple "while (p)": loop exits iff p is null.
-                            applyConditionConstraint(condRoot, ctx.state,
-                                                     ctx.members,
-                                                     ctx.containers,
-                                                     /*branchTaken=*/false);
-                        } else if (condRoot->str() == "&&") {
-                            // AND-chain: each null-guard pointer is Possible null.
-                            collectWhileExitConstraints(condRoot, ctx.state);
-                        }
+                        // Phase NW: inject null constraints on loop exit.
+                        applyLoopExitConstraints(condRoot, ctx);
 
                         // Phase NW3: re-inject UNINIT(Possible) for variables
                         // that were declared without an initializer (ctx.uninits),
@@ -2223,21 +2198,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     if (wCondClose && wCondClose->next()) {
                         tok = const_cast<Token*>(wCondClose->next()); // points to ";"
 
-                        // Extract the condition root and inject null constraints,
-                        // mirroring the regular while-loop handling above.
-                        const Token* condRoot = wCond->astOperand2();
-                        if (condRoot) {
-                            if (isTrackedPtrVar(condRoot)) {
-                                // Simple "do { } while (p)": exits iff p is null.
-                                applyConditionConstraint(condRoot, ctx.state,
-                                                         ctx.members,
-                                                         ctx.containers,
-                                                         /*branchTaken=*/false);
-                            } else if (condRoot->str() == "&&") {
-                                // AND-chain: p might be null on exit → Possible null.
-                                collectWhileExitConstraints(condRoot, ctx.state);
-                            }
-                        }
+                        // Inject null constraints on do-while loop exit
+                        // (same logic as the regular while handler above).
+                        applyLoopExitConstraints(wCond->astOperand2(), ctx);
                     }
                 }
             }
@@ -2387,18 +2350,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (!isKnownContainerMethod)
                 ctx.containers.clear();
 
-            // Phase U2: re-inject UNINIT(Possible) for all variables that
-            // were declared without an initializer and not yet assigned.
-            // This ensures that "still uninit" variables remain visible
-            // after a function call.
-            for (const nonneg int varId : ctx.uninits) {
-                if (callOutVars.count(varId))
-                    continue;
-                ValueFlow::Value u;
-                u.valueType = ValueFlow::Value::ValueType::UNINIT;
-                u.setPossible();
-                ctx.state[varId] = {u};
-            }
+            // Phase U2: re-inject UNINIT(Possible) for uninit variables.
+            reinjectUninitAfterCall(ctx, callOutVars);
 
             if (tok->link())
                 tok = tok->link();
