@@ -19,9 +19,137 @@
 /*
  * DataFlow analysis implementation.
  *
- * See dataflow.h for the full design rationale and requirements.
+ * See dataflow.h for the public API.
  *
- * File layout:
+ * =========================================================================
+ * REQUIREMENTS (user perspective)
+ * =========================================================================
+ *
+ * Requirement 1 — Null-pointer dereference detection:
+ *   Detect when a local pointer variable is assigned null (nullptr/NULL/0)
+ *   and then dereferenced without a null check in between.  Warn at the
+ *   dereference site so that CheckNullPointer can report the bug to the user.
+ *
+ * Requirement 2 — Uninitialized variable detection:
+ *   Detect when a local integer, pointer, or float variable is read before
+ *   it has been assigned any value.  Warn at the read site so that
+ *   CheckUninitVar can report the bug to the user.
+ *
+ * Requirement 3 — Flow-sensitivity:
+ *   Values must follow program execution order.  An assignment changes the
+ *   known value from that point forward.  An if/else branch must be analyzed
+ *   on each path independently; after the branch, only values present on all
+ *   surviving paths are carried forward.
+ *
+ * Requirement 4 — No false positives:
+ *   When the analysis encounters code that is too complex to reason about
+ *   precisely (deeply nested branches, too many tracked variables,
+ *   unrecognised patterns), it must stop and produce no output rather than
+ *   risk an incorrect warning.  False negatives (missed bugs) are acceptable;
+ *   false positives are not.
+ *
+ * Requirement 5 — Scalar types only:
+ *   Only integer, pointer, and floating-point scalar local variables are
+ *   tracked.  User-defined types, arrays, reference parameters, and global
+ *   variables are not tracked.
+ *
+ * Requirement 6 — Linear performance:
+ *   The analysis must complete in O(n) time per function, where n is the
+ *   number of tokens in the function body.  No iterative fixed-point
+ *   computation is used.
+ *
+ * =========================================================================
+ * ALGORITHM
+ * =========================================================================
+ *
+ * The analysis runs two passes over each function body.
+ *
+ * PASS 1 — Forward analysis (implements Requirements 1, 2, 3, 5, 6):
+ *   Walk tokens in program order, maintaining a state map (DFContext) from
+ *   variable IDs to their current known/possible values.  When an assignment
+ *   is seen the state is updated; when a variable is read the current state
+ *   values are written onto the token so that downstream checkers can inspect
+ *   them (Requirement 2 — values visible to checkers without modification).
+ *
+ *   Branches (Requirement 3): at every if/else the context is forked into two
+ *   independent copies, each analyzed separately.  The copies are merged at
+ *   the join point: a Known value that is identical on both paths stays Known;
+ *   differing values become Possible; a value present on only one path is
+ *   dropped (Requirement 4 — conservative merge).
+ *
+ *   Loops (Requirement 4): the loop body is scanned for assignments and any
+ *   variable modified inside is removed from the state before continuing after
+ *   the loop.  Exception: if a variable has an unconditional top-level
+ *   assignment in the loop body, it is treated as initialized after the loop
+ *   because loops are assumed to execute at least once (Requirement 4
+ *   trade-off: false negatives preferred over false positives).
+ *
+ *   Complexity limits (Requirement 4): the analysis aborts when branch nesting
+ *   exceeds MAX_BRANCH_DEPTH, loop nesting exceeds MAX_LOOP_DEPTH, or the
+ *   number of simultaneously tracked variables exceeds MAX_VARS.
+ *
+ * PASS 2 — Backward analysis (implements Requirements 1, 3):
+ *   Walk tokens in reverse program order, collecting value constraints from
+ *   condition checks (e.g. "if (x == 5)").  Those constraints are propagated
+ *   backward and annotated onto earlier reads of the same variable.  An
+ *   assignment to a variable kills the backward constraint for it.  Block
+ *   boundaries are treated conservatively (Requirement 4): any variable
+ *   assigned inside a block is dropped from the backward state when the block
+ *   boundary is crossed.
+ *
+ * PHASES (implemented inside the two passes):
+ *
+ *   Phase N — null pointer tracking (Requirement 1):
+ *     Pointer variables assigned nullptr/NULL/0 receive a Known(0) value.
+ *     Conditions such as "p==nullptr", "!p", "if(p)" update the state on each
+ *     branch so that reads on the null path are annotated.  CheckNullPointer
+ *     finds null values via Token::getValue(0) without any change.
+ *
+ *   Phase U — uninitialized variable tracking (Requirement 2):
+ *     Local variables declared without an initializer receive a UNINIT value.
+ *     Assignments clear it.  Reads while UNINIT is in state are annotated so
+ *     CheckUninitVar can detect the uninitialized use.
+ *
+ *   Phase U2 — enhanced uninit tracking, survives function calls (Requirement 2):
+ *     A separate set (DFUninitSet) remembers which variables were declared
+ *     without an initializer.  After a function call clears the main state,
+ *     UNINIT(Possible) is re-injected for every variable still in that set.
+ *     This prevents calls from silently hiding uninitialized variables.  The
+ *     set entry is removed when the variable is first definitely assigned.  At
+ *     branch merges the sets are unioned (a variable stays if it might be
+ *     uninitialized on any surviving path).
+ *
+ *   Phase F — float/double tracking (Requirement 2, 5):
+ *     Float, double, and long double scalar variables are tracked in the same
+ *     DFState as integers, using FLOAT-typed ValueFlow::Value entries.
+ *     evalConstFloat() constant-folds float expressions.
+ *
+ *   Phase S — string literal non-null (Requirement 1):
+ *     Assigning a string literal to a pointer stores an Impossible(0) value,
+ *     meaning the pointer is definitely not null.  This suppresses spurious
+ *     null-pointer warnings from CheckNullPointer.
+ *
+ *   Phase M — struct/class member field tracking (Requirements 1, 2):
+ *     "obj.field = value" and "obj.field" reads are tracked in a separate
+ *     DFMemberState keyed by (objectVarId, fieldVarId).  Forked at branches
+ *     and merged at join points using the same rules as the main DFState.
+ *     Function calls clear the member state conservatively.
+ *
+ *   Phase C — container size tracking:
+ *     Container variables (std::vector, std::string, …) are tracked in a
+ *     separate DFContState using CONTAINER_SIZE values.  push_back /
+ *     emplace_back increment the known size; pop_back decrements; clear
+ *     resets to 0.
+ *
+ *   Phase Cast — cast expression value propagation:
+ *     evalConstInt and evalConstFloat look through C-style and C++ cast
+ *     expressions so that assignments such as "int x = (int)5;" propagate
+ *     the constant value correctly.
+ *
+ * =========================================================================
+ * FILE LAYOUT
+ * =========================================================================
+ *
  *   1. Core types
  *        DFValues        — vector of values for one variable
  *        DFState         — varId → DFValues (int, ptr, float, UNINIT)
@@ -33,90 +161,29 @@
  *                          DFUninitSet; forked at branches and merged at joins
  *   2. Complexity limits (MAX_BRANCH_DEPTH, MAX_LOOP_DEPTH, MAX_VARS)
  *   3. Helper predicates
- *        isTrackedVar          — integral non-pointer scalar
+ *        isTrackedVar          — integral non-pointer scalar (Requirement 5)
  *        isTrackedPtrVar       — raw pointer (Phase N)
  *        isTrackedFloatVar     — float/double/long double scalar (Phase F)
  *        isTrackedContainerVar — std::vector / std::string / … (Phase C)
  *        isLhsOfAssignment     — token is written, not read
  *        isFunctionCallOpen    — '(' opening a function call
- *   4. evalConstInt       — constant-fold expression to integer
- *                           (handles nullptr/NULL → 0 for pointer tracking;
- *                            looks through cast expressions — Phase Cast)
- *   4b. evalConstFloat    — constant-fold expression to float (Phase F)
- *                           (also looks through cast expressions — Phase Cast)
- *   5. annotateTok        — write DFState values onto a token
- *      annotateMemberTok  — write DFMemberState values onto field token (Phase M)
- *      annotateContainerTok — write DFContState values onto container token (Phase C)
- *   6. mergeStates        — combine two DFState/DFContState after if/else
- *      mergeMemberStates  — combine two DFMemberState after if/else
- *      mergeContexts      — combine two DFContext after if/else
- *   7. blockTerminates    — detect unconditional exit from a block
+ *   4. evalConstInt / evalConstFloat — constant-fold expressions
+ *   5. annotateTok / annotateMemberTok / annotateContainerTok
+ *        Write state values onto tokens (implements Requirement 2 output)
+ *        Helpers: andLhsContainsVarGuard, orLhsContainsNullTest,
+ *                 isRhsOfGuardedAndBySameVar, isRhsOfGuardedOrByNullTest,
+ *                 isZeroValue, isNullTestCondition, isNonNullTestCondition,
+ *                 isInTrueBranchOfTernaryBySameVar,
+ *                 isInFalseBranchOfNegatedTernaryBySameVar
+ *   6. mergeStates / mergeMemberStates / mergeContexts
+ *        Combine two branch states at join points (Requirement 3)
+ *   7. blockTerminates — detect unconditional exit from a block
  *   8. applyConditionConstraint — derive state update from a condition
- *   9. dropWrittenVars    — remove loop-modified vars from DFContext
+ *   9. dropWrittenVars / hasTopLevelAssignment / collectWhileExitConstraints
+ *        Loop body helpers (Requirement 4)
  *  10. forwardAnalyzeBlock  — Pass 1 (forward walk, all phases)
  *  11. backwardAnalyzeBlock — Pass 2 (backward walk, int/ptr constraints)
  *  12. DataFlow::setValues  — public entry point
- *
- * NULL POINTER TRACKING (Phase N):
- *   Pointer variables are tracked when assigned nullptr/NULL/0.
- *   The null value is represented as a ValueFlow::Value with intvalue==0
- *   (identical to how the main ValueFlow analysis represents null pointers),
- *   so CheckNullPointer can find null values via Token::getValue(0) without
- *   any modification.  Conditions such as "p==nullptr", "p!=nullptr", "!p",
- *   and "if(p)" update the state in both the forward and backward passes.
- *
- * UNINIT VARIABLE TRACKING (Phase U):
- *   Local integer, pointer, and float variables declared without an
- *   initializer (e.g. "int x;", "int *p;", "double d;") are given a UNINIT
- *   value in the forward state.  Subsequent assignments clear the UNINIT.
- *   Variable reads that occur while the UNINIT is still in state are
- *   annotated so that CheckUninitVar can detect the uninitialized use.
- *
- * ENHANCED UNINIT TRACKING (Phase U2):
- *   The DFUninitSet (inside DFContext) remembers which variables were
- *   declared without an initializer.  After a function call clears the
- *   main state, UNINIT(Possible) is re-injected for every varId still in
- *   the uninit set.  This prevents the call from silently "forgetting"
- *   uninitialized variables.  The set is updated (erased) when the variable
- *   receives its first definite assignment.  At branch merges, the uninit
- *   sets are unioned so that a variable stays in the set if it might be
- *   uninitialized on any surviving path.
- *
- * FLOAT TRACKING (Phase F):
- *   Float, double, and long double scalar variables are tracked in the same
- *   DFState as integer variables, but using ValueFlow::Value entries with
- *   valueType==FLOAT and floatValue set.  evalConstFloat() constant-folds
- *   float expressions; annotateTok() writes FLOAT values onto tokens.
- *
- * STRUCT/CLASS MEMBER TRACKING (Phase M):
- *   Member accesses "obj.field = value" and "obj.field" reads are tracked
- *   in a separate DFMemberState keyed by (objectVarId, fieldVarId).
- *   The member state is forked at branches and merged at join points using
- *   the same rules as the main DFState.  Function calls clear the member
- *   state conservatively.
- *
- * STRING LITERAL NON-NULL (Phase S):
- *   Assigning a string literal to a pointer ("const char *p = "hello";")
- *   stores an Impossible(0) value on the pointer variable, indicating that
- *   the pointer is definitely NOT null.  This suppresses spurious null-
- *   pointer warnings from CheckNullPointer.
- *
- * CONTAINER SIZE TRACKING (Phase C):
- *   Container variables (std::vector, std::string, …) are tracked in a
- *   separate DFContState using CONTAINER_SIZE values.  push_back/
- *   emplace_back increment the known size; pop_back decrements it; clear
- *   resets it to 0.  The container variable token is annotated with the
- *   current size whenever it is read.
- *
- * CAST EXPRESSION VALUE PROPAGATION (Phase Cast):
- *   evalConstInt and evalConstFloat look through C-style and C++ cast
- *   expressions — "(T)expr" evaluates to the same value as expr.  This
- *   allows assignments such as "int x = (int)5;" or "void* p = (void*)0;"
- *   to propagate the constant value to the variable.
- *   In addition, forwardAnalyzeBlock annotates the cast token '(' itself
- *   with the evaluated value so that checkers examining expression-level
- *   values (rather than variable-level values) find the same result as
- *   ValueFlow would provide.
  */
 
 #include "dataflow.h"
@@ -602,36 +669,23 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
 // ===========================================================================
 // 5. annotateTok / annotateMemberTok / annotateContainerTok
 // ===========================================================================
+//
+// These functions write the current analysis state values onto token nodes so
+// that downstream checkers (CheckNullPointer, CheckUninitVar, …) can read
+// them via Token::getValue() / Token::addValue() without any modification.
+// This is the output mechanism of the analysis (Requirement 2).
+//
+// Several helper predicates are defined first because annotateTok needs them
+// to decide whether a particular use of a pointer is already guarded by a
+// null check in the surrounding expression (e.g. "p && p->x" — do not
+// annotate p->x with a possible-null value because p is guarded by the &&).
 
-/// Write the values from `state` onto tok->values().
-///
-/// Called for every variable-read token in the forward pass (for int, ptr,
-/// float, and UNINIT values) and in the backward pass (for int and ptr
-/// constraint values).  This is the mechanism by which analysis results
-/// become visible to the existing checkers (requirement 2).
-///
-/// Preconditions that must all hold for annotation to occur:
-///  - tok has a non-zero varId (it refers to a variable)
-///  - the variable is integral, pointer, or float
-///    (isTrackedVar, isTrackedPtrVar, or isTrackedFloatVar)
-///  - tok is not the LHS of an assignment (it is being read, not written)
-///  - tok is not the variable's declaration name token (it is a use, not a def)
-///  - the variable is present in state
-///
-/// Phase N: pointer variables are annotated so CheckNullPointer sees null.
-/// Phase U: UNINIT values are annotated so CheckUninitVar sees uninit uses.
-/// Phase F: FLOAT values are annotated from state on float variables.
-///
-/// NOTE: The backward pass may call this with a DFState that contains only
-/// int/ptr constraint values from conditions.  Float variables will never
-/// have backward constraint entries, so the isTrackedFloatVar guard is
-/// effectively dead in the backward pass (but harmless).
-// Requirement: when the LHS subtree of a '&&' chain contains a direct
-// non-null guard for varId (the pointer variable itself), return true.
-// This handles chained && expressions such as "s && foo" appearing as the
-// LHS of a later "&&", e.g. "(s && foo) && s->x" — s is guarded even
-// though it is not the immediate LHS of the outer &&.
-// Conservative: only recognises the simple "variable itself" form of guard.
+/// Returns true when the LHS subtree of a '&&' chain contains a direct
+/// non-null guard for varId (the pointer variable itself).
+/// Handles chained && expressions such as "s && foo" appearing as the
+/// LHS of a later "&&", e.g. "(s && foo) && s->x" — s is guarded even
+/// though it is not the immediate LHS of the outer &&.
+/// Conservative: only recognises the simple "variable itself" form of guard.
 static bool andLhsContainsVarGuard(const Token* lhs, nonneg int varId) {
     if (!lhs)
         return false;
@@ -717,6 +771,9 @@ static bool isRhsOfGuardedOrByNullTest(const Token* tok) {
     return false;
 }
 
+/// Returns true when tok carries a Known integer value of zero.
+/// Used by isNullTestCondition / isNonNullTestCondition to recognize
+/// null literal operands in comparisons such as "p == 0" or "p != 0".
 static bool isZeroValue(const Token* t) {
     return t && t->hasKnownIntValue() && t->getKnownIntValue() == 0;
 }
@@ -824,6 +881,33 @@ static bool isInFalseBranchOfNegatedTernaryBySameVar(const Token* tok) {
     return false;
 }
 
+/// Write the values from `state` onto tok->values() (Requirement 2).
+///
+/// Called for every variable-read token in the forward pass (for int, ptr,
+/// float, and UNINIT values) and in the backward pass (for int and ptr
+/// constraint values).  This is the mechanism by which analysis results
+/// become visible to existing checkers without modifying them.
+///
+/// Preconditions — all must hold for annotation to occur:
+///  - tok has a non-zero varId (it refers to a variable)
+///  - the variable is integral, pointer, or float (isTracked* predicates)
+///  - tok is not the LHS of an assignment (it is being read, not written)
+///  - tok is not the declaration name token itself (it is a use, not a def)
+///  - the variable is present in state
+///
+/// Phase N: pointer variables are annotated so CheckNullPointer sees null.
+/// Phase U: UNINIT values are annotated so CheckUninitVar sees uninit uses.
+/// Phase F: FLOAT values are annotated from state on float variables.
+///
+/// Null-guard suppression: when the use is the RHS of a guarded "&&" or "||"
+/// expression (e.g. "p && p->x"), or inside the guarded branch of a ternary,
+/// possible-null annotations are suppressed to avoid false positives
+/// (Requirement 4).
+///
+/// NOTE: The backward pass may call this with a DFState that contains only
+/// int/ptr constraint values from conditions.  Float variables will never
+/// have backward constraint entries, so the isTrackedFloatVar guard is
+/// effectively dead in the backward pass (but harmless).
 static void annotateTok(Token* tok, const DFState& state) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
@@ -1152,32 +1236,27 @@ static bool blockTerminates(const Token* start, const Token* end) {
 // 8. applyConditionConstraint
 // ===========================================================================
 
-/// Update `state` to reflect the information known when a condition evaluates
-/// to branchTaken (true = then-path, false = else-path).
-///
-/// Only handles the two trivially safe patterns:
-///   x == constant   and   x != constant   (and their mirror-image forms)
-/// plus pointer-specific patterns:
-///   !p, if(p), p==nullptr, p!=nullptr
-///
-/// All other condition forms are ignored (requirement 4 — no FP: when in
-/// doubt, do nothing).
-///
-/// `condRoot` is the AST root of the condition expression, typically obtained
-/// as  parenToken->astOperand2()  for  "if ( condition )".
-/// Update `state` and `members` to reflect what is known when a condition
+/// Update `state` and `members` to reflect what is known when `condRoot`
 /// evaluates to branchTaken (true = then-path, false = else-path).
 ///
-/// Handles:
-///   Phase N  — simple pointer variables: !p, if(p), p==nullptr, p!=nullptr
-///   Phase MN — member pointer fields:    !s.x, if(s.x), s.x==nullptr, s.x!=nullptr
+/// `condRoot` is the AST root of the condition expression, typically obtained
+/// as parenToken->astOperand2() for "if ( condition )".
 ///
-/// All other condition forms are ignored (requirement 4 — no FP: when in
-/// doubt, do nothing).
+/// Recognised patterns (Requirement 4 — only safe, unambiguous patterns):
+///   Phase N  — simple pointer variables:
+///     !p        → p is null  (branchTaken=true) / non-null (branchTaken=false)
+///     if(p)     → p is non-null (branchTaken=true) / null (branchTaken=false)
+///     p==nullptr, p==0  → p is null on the taken branch
+///     p!=nullptr, p!=0  → p is non-null on the taken branch
+///   Phase MN — member pointer fields (same patterns for s.x):
+///     !s.x, if(s.x), s.x==nullptr, s.x!=nullptr
 ///
-/// `members` is updated for member pointer conditions; `state` is updated for
-/// simple variable conditions.  Either may remain unchanged if the condition
-/// does not match a recognised pattern.
+/// All other condition forms are silently ignored (Requirement 4 — when in
+/// doubt, do nothing rather than risk a false positive).
+///
+/// `state` is updated for simple variable conditions; `members` is updated
+/// for member pointer conditions.  Either may remain unchanged when the
+/// condition does not match a recognised pattern.
 static void applyConditionConstraint(const Token* condRoot,
                                      DFState& state,
                                      DFMemberState& members,
@@ -2600,32 +2679,15 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 // 11. backwardAnalyzeBlock (Pass 2)
 // ===========================================================================
 
-/// Backward analysis pass: walk [start, end) in reverse order.
-///
-/// State semantics (inverted from forward):
-///   state[varId] = constraints on varId at a FUTURE program point,
-///                  propagated backward toward the current token.
-///
-/// Sources of constraints: condition checks (if (x == val)).
-/// Sinks: variable uses — annotated with the backward constraint.
-/// Killers: assignments — sever the backward chain for that variable.
-///
-/// When we encounter a '}' closing a sub-block going backward, we
-/// conservatively drop all variables assigned inside that block (we don't
-/// know which path was taken, so we can't claim anything about the variable
-/// BEFORE the block).  This is the primary way requirement 4 manifests in
-/// the backward pass.
-///
-/// Requirement 3 (flow-sensitive): assignments kill backward constraints.
-/// Apply a condition constraint backward into `state`.
+/// Apply a condition constraint backward into `state` (Pass 2 helper).
 ///
 /// Extracts value constraints from `condRoot` (via applyConditionConstraint),
-/// downgrades Known values to Possible (the branch may not always be taken),
-/// and merges the results into `state` without duplicates.
+/// downgrades Known values to Possible (the branch may not always be taken,
+/// Requirement 4), and merges the results into `state` without duplicates.
 ///
 /// Used in two places in backwardAnalyzeBlock:
 ///   1. The '}' handler when jumping backward past an if-block.
-///   2. The "if" keyword handler for tail-of-range if-blocks.
+///   2. The "if" keyword handler for if-blocks at the tail of the range.
 static void mergeBackwardCondition(const Token* condRoot, DFState& state) {
     DFState tmp;
     // Phase MN: backward pass does not track member null state;
@@ -2659,12 +2721,29 @@ static void mergeBackwardCondition(const Token* condRoot, DFState& state) {
     }
 }
 
-/// Requirement 4 (conservative): block boundaries are treated conservatively.
-/// Requirement 6 (fast): single backward pass, no iteration.
+/// Backward analysis pass: walk [start, end) in reverse order (Pass 2).
 ///
-/// NOTE: The backward pass uses only DFState (int/ptr constraints from
-/// conditions).  Float, member, container, and U2 tracking are forward-only;
-/// the backward pass does not produce those value types.
+/// State semantics (inverted from the forward pass):
+///   state[varId] = constraints on varId known at a FUTURE program point,
+///                  propagated backward toward the current token.
+///
+/// Sources of constraints: condition checks ("if (x == val)") — value
+///   constraints are extracted and propagated backward to earlier uses.
+/// Sinks: variable reads — annotated with the backward constraint so
+///   checkers can observe what value the variable is tested against.
+/// Killers: assignments — sever the backward chain for that variable
+///   (Requirement 3: flow-sensitive, the assignment changes the value).
+///
+/// Block boundaries are treated conservatively (Requirement 4): when a '}'
+/// is encountered going backward, all variables assigned inside the block
+/// are dropped from the state.  We cannot know which path was taken, so we
+/// cannot claim anything about a variable's value before the block.
+///
+/// Requirement 6: single backward pass, no iteration — O(n) per function.
+///
+/// NOTE: Only DFState (integer/pointer constraints from conditions) is used.
+/// Float, member, container, and Phase U2 tracking are forward-only; the
+/// backward pass does not produce those value types.
 static void backwardAnalyzeBlock(const Token* start, const Token* end,
                                  DFState& state, int branchDepth) {
     if (!start || !end || start == end)
