@@ -1404,6 +1404,24 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 10));
         }
+
+        // U15 (FP): integer variable assigned in the for-loop init clause must
+        //           NOT be reported as UNINIT after a function call following
+        //           the loop.  The init clause always executes unconditionally,
+        //           so x is definitely initialized when the loop is reached.
+        //           A subsequent function call must not re-inject UNINIT for x
+        //           via Phase U2 (ctx.uninits must be cleared for init-clause vars).
+        {
+            const char code[] = "int func();\n"                           // 1
+                                "void f(int n) {\n"                       // 2
+                                "  int x;\n"                              // 3  ← declared without init
+                                "  for (x = 0; x < n; ++x) {\n"          // 4  ← x assigned in init clause
+                                "  }\n"                                   // 5
+                                "  func();\n"                             // 6  ← triggers U2 re-injection
+                                "  (void)x;\n"                            // 7  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
     }
 
     // -----------------------------------------------------------------------

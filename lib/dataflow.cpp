@@ -2104,6 +2104,20 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         initEnd = initEnd->next();
                     }
                     dropWrittenVars(condOpen->next(), initEnd, ctx);
+                    // Phase U2: the init clause always executes unconditionally,
+                    // so variables assigned there are definitely initialized.
+                    // Remove them from ctx.uninits to prevent false UNINIT
+                    // re-injection after subsequent function calls.
+                    for (const Token* t = condOpen->next(); t && t != initEnd; t = t->next()) {
+                        if (t->isAssignmentOp()) {
+                            const Token* lhs = t->astOperand1();
+                            if (lhs && lhs->varId() > 0)
+                                ctx.uninits.erase(lhs->varId());
+                        }
+                        if ((t->str() == "++" || t->str() == "--") &&
+                            t->astOperand1() && t->astOperand1()->varId() > 0)
+                            ctx.uninits.erase(t->astOperand1()->varId());
+                    }
                 }
             }
 
