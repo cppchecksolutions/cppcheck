@@ -892,11 +892,19 @@ static bool isInFalseBranchOfNegatedTernaryBySameVar(const Token* tok) {
 /// possible-null annotations are suppressed to avoid false positives
 /// (Requirement 4).
 ///
+/// Conditional-UNINIT suppression (Requirement 4): when a variable has only a
+/// Possible(UNINIT) value (it was uninitialized on some paths after a branch
+/// merge, but initialized on others) AND the read itself is inside a
+/// conditional block (branchDepth > 0), do NOT annotate the UNINIT.  The use
+/// may be guarded by the same condition that implied initialization on all
+/// reachable paths, but the analysis does not track this path correlation.
+/// False negatives are preferred over false positives (project policy).
+///
 /// NOTE: The backward pass may call this with a DFState that contains only
 /// int/ptr constraint values from conditions.  Float variables will never
 /// have backward constraint entries, so the isTrackedFloatVar guard is
 /// effectively dead in the backward pass (but harmless).
-static void annotateTok(Token* tok, const DFState& state) {
+static void annotateTok(Token* tok, const DFState& state, int branchDepth = 0) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
     if (!isTrackedVar(tok) && !isTrackedPtrVar(tok) && !isTrackedFloatVar(tok))
@@ -919,6 +927,16 @@ static void annotateTok(Token* tok, const DFState& state) {
     const bool guardedNegTernary = isInFalseBranchOfNegatedTernaryBySameVar(tok);
     for (const ValueFlow::Value& val : it->second) {
         if ((guardedRhs || guardedOrRhs || guardedTernary || guardedNegTernary) && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+            continue;
+        // Requirement 4 — conditional-UNINIT suppression:
+        // A Possible(UNINIT) value inside a conditional block may be guarded by
+        // a flag that correlates with initialization (pattern: flag=1 ↔ var initialized).
+        // The analysis does not track this correlation, so skip the annotation to
+        // avoid false positives.  Known(UNINIT) is still annotated — that means
+        // the variable is definitely uninitialized on the current path.
+        if (branchDepth > 0 &&
+            val.valueType == ValueFlow::Value::ValueType::UNINIT &&
+            val.isPossible())
             continue;
         tok->addValue(val);
     }
@@ -1989,7 +2007,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             for (Token* ct = const_cast<Token*>(parenOpen->next());
                  ct && ct != parenClose; ct = ct->next()) {
                 if (ct->varId() > 0 && ct->isName()) {
-                    annotateTok(ct, ctx.state);
+                    annotateTok(ct, ctx.state, branchDepth);
                     annotateMemberTok(ct, ctx);
                     annotateContainerTok(ct, ctx);
                 }
@@ -2328,7 +2346,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     continue;
                 }
                 if (argTok->varId() > 0 && argTok->isName()) {
-                    annotateTok(argTok, ctx.state);
+                    annotateTok(argTok, ctx.state, branchDepth);
                     annotateMemberTok(argTok, ctx);
                     annotateContainerTok(argTok, ctx);
                 }
@@ -2623,9 +2641,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // Variable read: annotate with current state values
         // =================================================================
         if (tok->varId() > 0 && tok->isName()) {
-            annotateTok(tok, ctx.state);       // int, ptr, float, UNINIT
-            annotateMemberTok(tok, ctx);       // Phase M: member field values
-            annotateContainerTok(tok, ctx);    // Phase C: container size values
+            annotateTok(tok, ctx.state, branchDepth);  // int, ptr, float, UNINIT
+            annotateMemberTok(tok, ctx);               // Phase M: member field values
+            annotateContainerTok(tok, ctx);            // Phase C: container size values
         }
 
         // =================================================================

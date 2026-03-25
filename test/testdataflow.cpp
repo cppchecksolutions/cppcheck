@@ -1422,6 +1422,35 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 7));
         }
+
+        // U16 (FP): flag-guarded use of a variable that is only assigned when
+        //           the flag is set.  x is uninitialized on the path where
+        //           flag stays 0, but x is never read on that path because the
+        //           use is inside "if (flag)".  Must NOT be reported as uninit.
+        //
+        //           The analysis cannot track the correlation between x and flag,
+        //           so it suppresses Possible(UNINIT) for conditional reads
+        //           (branchDepth > 0) as a conservative false-positive guard
+        //           (Requirement 4: false negatives preferred).
+        {
+            const char code[] = "void f(int n) {\n"              // 1
+                                "  int x, flag=0;\n"             // 2  ← x declared without init
+                                "  if (n>0) {\n"                 // 3
+                                "    x = 0;\n"                   // 4  ← x assigned when flag=1
+                                "    flag = 1;\n"                // 5
+                                "  } else {\n"                   // 6
+                                "    if (n == -100) {\n"         // 7
+                                "      x = 1;\n"                 // 8  ← x assigned when flag=1
+                                "      flag = 1;\n"              // 9
+                                "    } else {\n"                 // 10 ← x NOT assigned, flag stays 0
+                                "    }\n"                        // 11
+                                "  }\n"                          // 12
+                                "  if (flag) {\n"                // 13 ← guard: only reached when x was assigned
+                                "    x++;\n"                     // 14 ← x must NOT be UNINIT here
+                                "  }\n"                          // 15
+                                "}\n";                           // 16
+            ASSERT(!testValueOfXUninit(code, 14));
+        }
     }
 
     // -----------------------------------------------------------------------
