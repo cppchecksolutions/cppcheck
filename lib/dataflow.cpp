@@ -119,6 +119,18 @@
  *     branch merges the sets are unioned (a variable stays if it might be
  *     uninitialized on any surviving path).
  *
+ *   Phase U-CI — conditional initialization resolution (Requirement 2, 4):
+ *     When a variable is initialized inside the then-block of an if-statement
+ *     with a simple "condVar == const" condition (no else branch), but remains
+ *     possibly-uninit on the else-path, a conditional initialization fact is
+ *     recorded: condInits[varId] = {condVarId, condValue}.  When a subsequent
+ *     guard (e.g. "if (condVar != const) { return; }") is processed and the
+ *     surviving path has condVar == Known(const), the fact is resolved and
+ *     varId is removed from uninits.  This prevents Phase U2 from falsely
+ *     re-injecting UNINIT after function calls when the guard guarantees the
+ *     initializing block was taken (Requirement 4 — no false positives).
+ *     The fact is invalidated if condVar is reassigned between the two ifs.
+ *
  *   Phase F — float/double tracking (Requirement 2, 5):
  *     Float, double, and long double scalar variables are tracked in the same
  *     DFState as integers, using FLOAT-typed ValueFlow::Value entries.
@@ -181,6 +193,7 @@
  *   8. applyConditionConstraint — derive state update from a condition
  *   9. dropWrittenVars / hasTopLevelAssignment / collectWhileExitConstraints
  *        Loop body helpers (Requirement 4)
+ *  9d. resolveCondInits / recordConditionalInits — Phase U-CI helpers
  *  10. forwardAnalyzeBlock  — Pass 1 (forward walk, all phases)
  *  11. backwardAnalyzeBlock — Pass 2 (backward walk, int/ptr constraints)
  *  12. DataFlow::setValues  — public entry point
@@ -283,6 +296,15 @@ struct DFContext {
     /// from the "safe to preserve" set at call sites, because a called
     /// function could reach it through a pointer that holds &var.
     std::unordered_set<nonneg int> addressTaken;
+
+    /// Phase U-CI: conditional initialization facts.
+    /// condInits[varId] = {condVarId, condValue}: varId was initialized
+    /// in the then-block of an if-statement whose condition was
+    /// "condVarId == condValue".  When condVarId later becomes Known
+    /// (condValue) in state (e.g. after a guard "if (condVarId != condValue)
+    /// { return; }"), the fact is resolved and varId is removed from uninits.
+    /// Invalidated when condVarId is assigned in the outer scope.
+    std::unordered_map<nonneg int, std::pair<nonneg int, MathLib::bigint>> condInits;
 };
 
 
@@ -1115,6 +1137,10 @@ static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
     result.uninits = c1.uninits;
     for (const nonneg int varId : c2.uninits)
         result.uninits.insert(varId);
+    // Phase U-CI: union condInits — keep any conditional-init fact from either branch
+    result.condInits = c1.condInits;
+    for (const auto& kv : c2.condInits)
+        result.condInits.insert(kv);
     return result;
 }
 
@@ -1619,6 +1645,86 @@ static void applyLoopExitConstraints(const Token* condRoot, DFContext& ctx) {
 
 
 // ===========================================================================
+// 9d. resolveCondInits / recordConditionalInits (Phase U-CI)
+// ===========================================================================
+
+/// Phase U-CI: resolve conditional initialization facts in ctx.condInits.
+///
+/// For each entry condInits[varId] = {condVarId, condValue}: if ctx.state
+/// currently contains condVarId as a single Known value equal to condValue,
+/// then the condition that guarded initialization of varId is now guaranteed
+/// true.  Remove varId from ctx.uninits and from ctx.state (clearing any
+/// stale UNINIT entry), and remove the resolved fact from condInits.
+///
+/// Called on the surviving path of a terminating if-block (e.g. after
+/// "if (result != 1) { return; }" when ctx = ctxElse with result=Known(1)).
+static void resolveCondInits(DFContext& ctx) {
+    for (auto it = ctx.condInits.begin(); it != ctx.condInits.end(); ) {
+        const nonneg int varId    = it->first;
+        const nonneg int condVarId = it->second.first;
+        const MathLib::bigint condValue = it->second.second;
+        const auto sit = ctx.state.find(condVarId);
+        if (sit != ctx.state.end() &&
+            sit->second.size() == 1 &&
+            sit->second[0].isKnown() &&
+            sit->second[0].isIntValue() &&
+            sit->second[0].intvalue == condValue) {
+            // Condition is Known true on surviving path → variable was initialized
+            ctx.uninits.erase(varId);
+            ctx.state.erase(varId);
+            it = ctx.condInits.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+/// Phase U-CI: record conditional initialization facts after a no-else if block.
+///
+/// Called after forking and merging "if (condRoot) { … }" with no else branch,
+/// when neither branch terminates.  For each variable that is in ctxElse.uninits
+/// (was uninitialized on the path where the condition was false) but is NOT in
+/// ctxThen.uninits (was initialized in the then-block, e.g. via &var passed to
+/// a function), record in result.condInits that the variable was initialized
+/// when the if-condition held.
+///
+/// Only simple "var == const" conditions are handled (conservative — Requirement 4).
+/// The fact is later resolved by resolveCondInits when the condition becomes Known.
+static void recordConditionalInits(const Token* condRoot,
+                                    const DFContext& ctxThen,
+                                    const DFContext& ctxElse,
+                                    DFContext& result) {
+    if (!condRoot || condRoot->str() != "==")
+        return;
+    const Token* op1 = condRoot->astOperand1();
+    const Token* op2 = condRoot->astOperand2();
+    if (!op1 || !op2)
+        return;
+    // Identify the variable side and the constant side of "var == const"
+    const Token* varTok = nullptr;
+    MathLib::bigint constVal = 0;
+    const DFState emptyState;
+    ValueFlow::Value cv;
+    if ((isTrackedVar(op1) || isTrackedPtrVar(op1)) && evalConstInt(op2, emptyState, cv)) {
+        varTok = op1;
+        constVal = cv.intvalue;
+    } else if ((isTrackedVar(op2) || isTrackedPtrVar(op2)) && evalConstInt(op1, emptyState, cv)) {
+        varTok = op2;
+        constVal = cv.intvalue;
+    }
+    if (!varTok)
+        return;
+    const nonneg int condVarId = varTok->varId();
+    // For each variable initialized in the then-block (absent from ctxThen.uninits)
+    // but still possibly-uninit on the else-path (present in ctxElse.uninits):
+    for (const nonneg int uid : ctxElse.uninits) {
+        if (ctxThen.uninits.count(uid) == 0)
+            result.condInits[uid] = {condVarId, constVal};
+    }
+}
+
+
+// ===========================================================================
 // 10. forwardAnalyzeBlock (Pass 1)
 // ===========================================================================
 
@@ -2095,11 +2201,13 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 const bool elseTerminates = blockTerminates(elseOpen->next(), elseClose);
 
                 // Merge: keep only the context from paths that reach the join point.
-                if (thenTerminates && !elseTerminates)
+                if (thenTerminates && !elseTerminates) {
                     ctx = std::move(ctxElse);       // only else continues
-                else if (!thenTerminates && elseTerminates)
+                    resolveCondInits(ctx);           // Phase U-CI: surviving path may satisfy a condInit
+                } else if (!thenTerminates && elseTerminates) {
                     ctx = std::move(ctxThen);       // only then continues
-                else if (!thenTerminates && !elseTerminates)
+                    resolveCondInits(ctx);           // Phase U-CI
+                } else if (!thenTerminates && !elseTerminates)
                     ctx = mergeContexts(ctxThen, ctxElse);
                 // else both terminate → dead code follows; ctx doesn't matter
 
@@ -2119,10 +2227,22 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 // The two paths at the merge point are:
                 //   Path A (then taken):   ctxThen  (possibly exits if thenTerminates)
                 //   Path B (then skipped): ctxElse  (condition was false)
-                if (thenTerminates)
+                if (thenTerminates) {
                     ctx = std::move(ctxElse);       // only B reaches here
-                else
+                    // Phase U-CI: the surviving path (B) had the condition false.
+                    // This means any earlier "if (condVar == val)" block that
+                    // conditionally initialized variables was NOT the path that
+                    // terminated.  But more importantly: if a guard like
+                    // "if (condVar != val) { return; }" just terminated the
+                    // then-branch, the surviving ctxElse has condVar=Known(val).
+                    // Resolve any condInit facts now satisfied by that constraint.
+                    resolveCondInits(ctx);
+                } else {
                     ctx = mergeContexts(ctxThen, ctxElse);
+                    // Phase U-CI: record variables initialized in the then-block
+                    // but not the else-path, keyed by the if-condition.
+                    recordConditionalInits(condRoot, ctxThen, ctxElse, ctx);
+                }
 
                 tok = const_cast<Token*>(thenClose);
             }
@@ -2554,6 +2674,18 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             }
 
             const nonneg int varId  = lhs->varId();
+
+            // Phase U-CI: if the assigned variable is used as the condition
+            // variable in a condInit fact, invalidate that fact.  The recorded
+            // correlation "varId was initialized when condVar == val" is only
+            // valid as long as condVar has not been reassigned since recording.
+            for (auto it = ctx.condInits.begin(); it != ctx.condInits.end(); ) {
+                if (it->second.first == varId)
+                    it = ctx.condInits.erase(it);
+                else
+                    ++it;
+            }
+
             const bool isIntVar     = isTrackedVar(lhs);
             const bool isPtrVar     = isTrackedPtrVar(lhs);
             const bool isFloatVar   = isTrackedFloatVar(lhs);
@@ -2712,6 +2844,13 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             const nonneg int varId = tok->astOperand1()->varId();
             // Phase U2: increment/decrement is a definite write
             ctx.uninits.erase(varId);
+            // Phase U-CI: invalidate condInit facts whose guard depends on this var
+            for (auto it = ctx.condInits.begin(); it != ctx.condInits.end(); ) {
+                if (it->second.first == varId)
+                    it = ctx.condInits.erase(it);
+                else
+                    ++it;
+            }
             auto it = ctx.state.find(varId);
             if (it != ctx.state.end() &&
                 it->second.size() == 1 &&

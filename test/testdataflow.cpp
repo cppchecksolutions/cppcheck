@@ -2732,6 +2732,38 @@ private:
             // x is assigned in the for-loop condition clause — must NOT be UNINIT.
             ASSERT(!testValueOfXUninit(code, 8));
         }
+
+        // FP24: pointer initialized via address-of in a conditional block,
+        //       then used after a guard that ensures the condition was true.
+        //       Regression for test1.c (TclNRTailcallEval pattern):
+        //         Tcl_Namespace *nsPtr;
+        //         if (result == TCL_OK) { result = getNamespace(interp, obj, &nsPtr); }
+        //         if (result != TCL_OK) { return; }
+        //         other_call();   ← reinjects UNINIT (FP) without Phase U-CI
+        //         use(nsPtr);     ← false positive uninitvar
+        //       Root cause: Phase U2 re-injects UNINIT for nsPtr after the
+        //       intermediate function call because the analysis does not know
+        //       that `if (result != TCL_OK) { return; }` implies the first
+        //       if-block was taken (and hence nsPtr was initialized).
+        //       Fix (Phase U-CI): record that nsPtr was conditionally initialized
+        //       when result == 1; resolve it on the surviving path of the guard.
+        {
+            const char code[] = "int init(int**);\n"                   // 1
+                                "void other();\n"                      // 2
+                                "void use(int*);\n"                    // 3
+                                "void f(int result) {\n"               // 4
+                                "  int* x;\n"                          // 5
+                                "  if (result == 1) {\n"               // 6
+                                "    result = init(&x);\n"             // 7  x initialized, result reassigned
+                                "  }\n"                                // 8
+                                "  if (result != 1) {\n"               // 9
+                                "    return;\n"                        // 10
+                                "  }\n"                                // 11
+                                "  other();\n"                         // 12  triggers UNINIT re-injection without fix
+                                "  use(x);\n"                          // 13  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 13));
+        }
     }
 };
 
