@@ -1348,6 +1348,21 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // U12 (FP): pointer initialized in for-loop init clause must NOT be
+        //           reported as UNINIT after the loop.
+        //           "for (x = p; *x != '\\0'; x++) {}" assigns x unconditionally
+        //           in the init clause, so x is always initialized when the loop
+        //           is reached.
+        {
+            const char code[] = "void f(char *p) {\n"                      // 1
+                                "  char *x;\n"                             // 2  ← declared without init
+                                "  for (x = p; *x != '\\0'; x++) {\n"     // 3  ← x assigned in init
+                                "  }\n"                                    // 4
+                                "  *x = '\\0';\n"                          // 5  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -2010,6 +2010,30 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 if (!condClose)
                     continue;
                 bodyOpen = condClose->next();
+
+                // For-loop init clause: "for (init; cond; incr)"
+                // The init clause executes unconditionally before the loop body,
+                // so any assignment in it initializes the variable.  Find the
+                // first ';' at paren-depth 0 inside the for-parens and drop any
+                // variables assigned in that range from the UNINIT state.
+                // Requirement: prevents false positives such as
+                //   "char *x; for (x = p; *x; x++) {} *x = 0;"
+                // where x is assigned in the init clause but declared without
+                // an initializer.
+                if (tok->str() == "for") {
+                    const Token* initEnd = condOpen->next();
+                    int parenDepth = 0;
+                    while (initEnd && initEnd != condClose) {
+                        if (initEnd->str() == "(" || initEnd->str() == "[")
+                            ++parenDepth;
+                        else if (initEnd->str() == ")" || initEnd->str() == "]")
+                            --parenDepth;
+                        else if (parenDepth == 0 && initEnd->str() == ";")
+                            break;
+                        initEnd = initEnd->next();
+                    }
+                    dropWrittenVars(condOpen->next(), initEnd, ctx);
+                }
             }
 
             if (!bodyOpen || bodyOpen->str() != "{")
