@@ -1624,6 +1624,20 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // U2.5: variable passed to a function whose declaration is not visible
+        //       must NOT be flagged as UNINIT after the call.  The callee may
+        //       initialize it through a non-const reference parameter.
+        //       Requirement 4: false negatives are preferable to false positives.
+        {
+            const char code[] = "struct S;\n"                   // 1
+                                "void f(S& dp) {\n"             // 2
+                                "  int x;\n"                    // 3
+                                "  dp.colour(x);\n"             // 4  ← colour not declared
+                                "  (void)x;\n"                  // 5  ← NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 
     // -----------------------------------------------------------------------

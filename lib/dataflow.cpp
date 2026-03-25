@@ -1660,8 +1660,17 @@ static void collectRefOutVars(const Token* tok,
 
     // General case: look up the Function object and check each parameter.
     const Function* func = tok->previous()->function();
-    if (!func)
-        return;  // no declaration visible — conservative: do nothing
+    if (!func) {
+        // No declaration visible — conservatively assume every argument could be
+        // an out-parameter initialized by the callee through a non-const reference.
+        // Requirement 4: false negatives are preferable to false positives.
+        // Without declaration information we cannot determine parameter types, so
+        // we must not re-inject UNINIT for any argument variable after this call.
+        forEachCallArg(tok, [&out](const Token* argTok, nonneg int /*argIndex*/) {
+            out.insert(argTok->varId());
+        });
+        return;
+    }
 
     // Requirement: only non-const lvalue references are out-parameters.
     // Const references are read-only; rvalue references are not written back.
