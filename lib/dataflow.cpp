@@ -2109,6 +2109,24 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 //   "char *x; for (x = p; *x; x++) {} *x = 0;"
                 // where x is assigned in the init clause but declared without
                 // an initializer.
+                // Phase U-WC: while-loop condition assignments.
+                // The while condition executes every iteration and at least
+                // once before the loop exits, so any variable assigned in it
+                // is definitely initialized after the loop.  Remove from
+                // ctx.uninits and erase from state (value is unknown).
+                // Example: "while (0 > (x = read(...))) ;" — x is initialized
+                // even though the loop body is empty.
+                if (tok->str() == "while") {
+                    for (const Token* ct = condOpen->next(); ct && ct != condClose; ct = ct->next()) {
+                        if (ct->str() == "=" && !ct->isComparisonOp() &&
+                            ct->astOperand1() && ct->astOperand1()->varId() > 0) {
+                            const nonneg int varId = ct->astOperand1()->varId();
+                            ctx.uninits.erase(varId);
+                            ctx.state.erase(varId);
+                        }
+                    }
+                }
+
                 if (tok->str() == "for") {
                     const Token* initEnd = condOpen->next();
                     int parenDepth = 0;

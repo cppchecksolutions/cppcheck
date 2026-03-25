@@ -1451,6 +1451,22 @@ private:
                                 "}\n";                           // 16
             ASSERT(!testValueOfXUninit(code, 14));
         }
+
+        // U17 (FP): variable assigned in a while-loop condition must NOT be
+        //           reported as UNINIT after the loop.  The condition always
+        //           executes at least once, so the variable is definitely
+        //           initialized when the loop exits.
+        //           Reproduces: "while(0>(x=write(...))&&errno==EINTR)" reports
+        //           x as uninit after the loop.
+        {
+            const char code[] = "int getValue();\n"                // 1
+                                "void f() {\n"                     // 2
+                                "  int x;\n"                       // 3  ← declared without init
+                                "  while (0 > (x = getValue())) ;\n" // 4  ← x assigned in condition
+                                "  (void)x;\n"                     // 5  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 
     // -----------------------------------------------------------------------
