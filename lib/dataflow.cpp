@@ -627,7 +627,7 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
     }
 
     // --- Unary minus ---
-    if (expr->str() == "-" && expr->astOperand1() && !expr->astOperand2()) {
+    if (expr->isUnaryOp("-")) {
         ValueFlow::Value inner;
         if (!evalConstFloat(expr->astOperand1(), state, inner))
             return false;
@@ -637,7 +637,7 @@ static bool evalConstFloat(const Token* expr, const DFState& state, ValueFlow::V
     }
 
     // --- Binary arithmetic ---
-    if (expr->astOperand1() && expr->astOperand2()) {
+    if (expr->isBinaryOp()) {
         ValueFlow::Value lhs, rhs;
         if (!evalConstFloat(expr->astOperand1(), state, lhs) ||
             !evalConstFloat(expr->astOperand2(), state, rhs))
@@ -2965,8 +2965,6 @@ void setValues(TokenList& tokenlist,
 
         // -----------------------------------------------------------------
         // Pass 1: Forward analysis
-        //
-        // Walk from the first token after '{' to the closing '}'.
         // -----------------------------------------------------------------
         {
             DFContext fwdCtx;  // all fields default-initialised (empty)
@@ -2976,8 +2974,6 @@ void setValues(TokenList& tokenlist,
 
         // -----------------------------------------------------------------
         // Pass 2: Backward analysis
-        //
-        // Walk from the closing '}' back to the first token after '{'.
         // -----------------------------------------------------------------
         {
             DFState bwdState;
