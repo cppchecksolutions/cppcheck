@@ -2676,6 +2676,29 @@ private:
             // x is assigned on every path — must NOT be reported as UNINIT.
             ASSERT(!testValueOfXUninit(code, 9));
         }
+
+        // FP23: pointer assigned in for-loop condition clause must NOT be
+        //       reported as uninitialized after the loop.
+        //       Regression for test1.c (proj library search pattern):
+        //         const char* s;
+        //         for (i = 0; (s = array[i].id) && cmp(s, name); ++i) ;
+        //         if (s == nullptr) return;   <- false positive uninitvar
+        //       Root cause: the for-loop condition clause was not scanned for
+        //       assignments; variables assigned there remained in ctx.uninits
+        //       with a stale UNINIT value in ctx.state.
+        {
+            const char code[] = "const char* get(int);\n"              // 1
+                                "int cmp(const char*, const char*);\n" // 2
+                                "void f(const char* name) {\n"         // 3
+                                "  const char* x;\n"                   // 4
+                                "  int i;\n"                           // 5
+                                "  for (i = 0; (x = get(i)) && cmp(x, name); ++i)\n"  // 6
+                                "    ;\n"                               // 7
+                                "  (void)x;\n"                         // 8
+                                "}\n";
+            // x is assigned in the for-loop condition clause — must NOT be UNINIT.
+            ASSERT(!testValueOfXUninit(code, 8));
+        }
     }
 };
 

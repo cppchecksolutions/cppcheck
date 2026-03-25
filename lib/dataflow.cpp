@@ -2173,6 +2173,40 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                             t->astOperand1() && t->astOperand1()->varId() > 0)
                             ctx.uninits.erase(t->astOperand1()->varId());
                     }
+
+                    // Phase U2-FC: the for-loop condition clause always executes
+                    // (at least once, before the loop exits).  Variables assigned
+                    // in the condition are therefore definitely initialized after
+                    // the loop.  Find the second ';' (end of condition clause) and
+                    // erase assigned variables from both ctx.uninits and ctx.state
+                    // so that the stale UNINIT value is not annotated on reads
+                    // after the loop.
+                    // Requirement: this prevents false positives such as
+                    //   const char* s;
+                    //   for (i = 0; (s = array[i].id) && cmp(s); ++i) ;
+                    //   if (!s) return;   ← must NOT be flagged uninitvar
+                    if (initEnd && initEnd->str() == ";") {
+                        const Token* condEnd = initEnd->next();
+                        int condDepth = 0;
+                        while (condEnd && condEnd != condClose) {
+                            if (condEnd->str() == "(" || condEnd->str() == "[")
+                                ++condDepth;
+                            else if (condEnd->str() == ")" || condEnd->str() == "]")
+                                --condDepth;
+                            else if (condDepth == 0 && condEnd->str() == ";")
+                                break;
+                            condEnd = condEnd->next();
+                        }
+                        for (const Token* t = initEnd->next(); t && t != condEnd; t = t->next()) {
+                            if (t->isAssignmentOp()) {
+                                const Token* lhs = t->astOperand1();
+                                if (lhs && lhs->varId() > 0) {
+                                    ctx.uninits.erase(lhs->varId());
+                                    ctx.state.erase(lhs->varId());
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
