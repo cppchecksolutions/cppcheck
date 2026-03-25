@@ -2047,6 +2047,25 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // conservative (requirement 4).
             dropWrittenVars(bodyOpen->next(), bodyClose, ctx);
 
+            // Phase NW4: assume every loop executes its body at least once.
+            // If a variable in ctx.uninits has an unconditional top-level
+            // assignment in the loop body, remove it from ctx.uninits.
+            // This prevents Phase U2 (function-call re-injection) from
+            // falsely reporting the variable as possibly-uninitialized after
+            // the loop.
+            //
+            // Requirement: false negatives are preferred over false positives
+            // (project policy).  A loop whose condition is false from the
+            // start technically never executes its body, but the more common
+            // case is that the body runs at least once, so we accept the
+            // trade-off.
+            for (auto it = ctx.uninits.begin(); it != ctx.uninits.end(); ) {
+                if (hasTopLevelAssignment(*it, bodyOpen->next(), bodyClose))
+                    it = ctx.uninits.erase(it);
+                else
+                    ++it;
+            }
+
             // Phase NW: after a while loop exits, its condition was false.
             // Inject null constraints for pointer null-guards so that
             // downstream null-pointer checkers can detect dereferences of the

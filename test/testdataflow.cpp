@@ -1363,6 +1363,47 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // U13 (FP): variable assigned at top level of "for (;;)" body must NOT
+        //           be reported as UNINIT after the loop, even after a function
+        //           call (which triggers Phase U2 re-injection from ctx.uninits).
+        //           "for (;;)" is an infinite loop — the body always executes
+        //           at least once before any break, so x is guaranteed
+        //           initialized when the loop exits.
+        {
+            const char code[] = "char *getcwd(char *, int);\n"               // 1
+                                "void f(int n) {\n"                           // 2
+                                "  char *x;\n"                                // 3  ← declared without init
+                                "  for (;;) {\n"                              // 4
+                                "    x = (char *)alloca(n);\n"                // 5  ← top-level assignment
+                                "    if (getcwd(x, n))\n"                     // 6  ← break condition
+                                "      break;\n"                              // 7
+                                "    n++;\n"                                  // 8
+                                "  }\n"                                       // 9
+                                "  getcwd(x, n);\n"                          // 10 ← function call triggers U2
+                                "  (void)x;\n"                               // 11 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 11));
+        }
+
+        // U14 (FP): variable assigned at top level of a regular for-loop body
+        //           must NOT be reported as UNINIT after the loop.
+        //           Loops are assumed to execute at least once (false negatives
+        //           are preferred over false positives per project policy).
+        {
+            const char code[] = "char *getcwd(char *, int);\n"               // 1
+                                "void f(int n) {\n"                           // 2
+                                "  char *x;\n"                                // 3  ← declared without init
+                                "  for (int c = 0; c < n; ++c) {\n"          // 4
+                                "    x = (char *)alloca(n);\n"                // 5  ← top-level assignment
+                                "    if (getcwd(x, n))\n"                     // 6
+                                "      break;\n"                              // 7
+                                "  }\n"                                       // 8
+                                "  getcwd(x, n);\n"                          // 9  ← function call triggers U2
+                                "  (void)x;\n"                               // 10 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 10));
+        }
     }
 
     // -----------------------------------------------------------------------
