@@ -1845,8 +1845,15 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                          argTok = argTok->next()) {
                         if (argTok->str() == "&" && !argTok->astOperand2()) {
                             const Token* operand = argTok->astOperand1();
-                            if (operand && operand->varId() > 0)
+                            if (operand && operand->varId() > 0) {
                                 callOutVars.insert(operand->varId());
+                                // Requirement: erase from uninits so that
+                                // subsequent unrelated calls do not re-inject
+                                // UNINIT for this variable — the callee may
+                                // have initialized it through the pointer.
+                                // Mirrors the statement-level handler.
+                                ctx.uninits.erase(operand->varId());
+                            }
                         }
                     }
                 }

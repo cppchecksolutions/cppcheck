@@ -2417,6 +2417,30 @@ private:
             }));
         }
 
+        // FP20: variable passed by address to a function call inside an
+        //       if-condition with negated early return, followed by an
+        //       unrelated function call.
+        //       The unrelated call must NOT re-inject UNINIT for the variable
+        //       because the callee of the condition call may have initialized
+        //       it through the pointer.
+        //       Regression for test1.cpp (PythonQt importer pattern):
+        //         const char* x;
+        //         if (!PyArg_ParseTuple(args, "s", &x)) return -1;
+        //         if (importInterface()->exists(x)) { ... }  ← false positive
+        {
+            const char code[] = "bool parse(const char** out);\n"  // 1
+                                "void other();\n"                   // 2
+                                "void use(const char*);\n"          // 3
+                                "void f() {\n"                      // 4
+                                "  const char* x;\n"                // 5
+                                "  if (!parse(&x))\n"               // 6
+                                "    return;\n"                     // 7
+                                "  other();\n"                      // 8  triggers re-injection bug
+                                "  use(x);\n"                       // 9  must not be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 9));
+        }
+
         // FP19: container.empty() early-return guard inside a lambda.
         //       The lambda captures a container by reference; inside the lambda
         //       body "if (x.empty()) return false; return x.top() > 0;" the
