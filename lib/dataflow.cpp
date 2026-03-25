@@ -1940,9 +1940,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     for (const Token* argTok = ct->next();
                          argTok && argTok != ct->link();
                          argTok = argTok->next()) {
-                        if (argTok->str() == "&" && !argTok->astOperand2()) {
+                        if (argTok->isUnaryOp("&")) {
                             const Token* operand = argTok->astOperand1();
-                            if (operand && operand->varId() > 0) {
+                            if (operand->varId() > 0) {
                                 callOutVars.insert(operand->varId());
                                 // Requirement: erase from uninits so that
                                 // subsequent unrelated calls do not re-inject
@@ -2368,13 +2368,22 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     annotateMemberTok(argTok, ctx);
                     annotateContainerTok(argTok, ctx);
                 }
+            }
 
-                // Requirement: unary '&var' argument indicates potential
-                // out-parameter write by the callee.  Avoid re-injecting
-                // UNINIT for such vars immediately after this call.
-                if (argTok->str() == "&" && !argTok->astOperand2()) {
+            // Requirement: unary '&var' anywhere in the argument list
+            // indicates a potential out-parameter write by the callee.
+            // Walk ALL tokens (no paren skipping) so that address-of
+            // expressions inside casts — both C++ named casts
+            // (reinterpret_cast<void**>(&p)) and C-style casts
+            // ((void**)(&p)) — are detected.  When found, the variable is
+            // removed from ctx.uninits so that subsequent calls do not
+            // re-inject UNINIT for it (Phase U2).
+            for (const Token* argTok = tok->next();
+                 argTok && argTok != tok->link();
+                 argTok = argTok->next()) {
+                if (argTok->isUnaryOp("&")) {
                     const Token* operand = argTok->astOperand1();
-                    if (operand && operand->varId() > 0) {
+                    if (operand->varId() > 0) {
                         // Also mark as address-taken before the clear step so
                         // local-scalar preservation does not keep stale UNINIT.
                         ctx.addressTaken.insert(operand->varId());

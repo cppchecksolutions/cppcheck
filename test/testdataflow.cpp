@@ -2589,6 +2589,36 @@ private:
             ASSERT(!testValueOfXUninit(code, 9));
         }
 
+        // FP21: pointer passed via reinterpret_cast<void**>(&p) to a function
+        //       call.  The cast wraps the '&p' address-of expression in a
+        //       nested '(...)' that the token iteration skips; as a result the
+        //       variable is not recognised as an out-parameter and UNINIT is
+        //       re-injected after the call.
+        //       Regression for test1.cpp (HSA/AMD GPU allocation pattern):
+        //         struct T* p;
+        //         fn(pool, reinterpret_cast<void**>(&p));
+        //         memset(p->field, 0, sizeof(p->field));  ← false positive
+        {
+            // C++ named cast: reinterpret_cast<void**>(&x)
+            const char code[] = "void alloc(void**);\n"             // 1
+                                "void f() {\n"                       // 2
+                                "  int* x;\n"                        // 3
+                                "  alloc(reinterpret_cast<void**>(&x));\n"  // 4
+                                "  (void)*x;\n"                      // 5  must not be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
+        {
+            // C-style cast: (void**)(&x)
+            const char code[] = "void alloc(void**);\n"             // 1
+                                "void f() {\n"                       // 2
+                                "  int* x;\n"                        // 3
+                                "  alloc((void**)(&x));\n"           // 4
+                                "  (void)*x;\n"                      // 5  must not be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
+
         // FP19: container.empty() early-return guard inside a lambda.
         //       The lambda captures a container by reference; inside the lambda
         //       body "if (x.empty()) return false; return x.top() > 0;" the
