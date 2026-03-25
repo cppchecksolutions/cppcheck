@@ -1864,8 +1864,27 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // if / else
         // =================================================================
         if (tok->str() == "if") {
-            if (branchDepth >= MAX_BRANCH_DEPTH)
-                return;  // too deeply nested — abort (requirement 4)
+            if (branchDepth >= MAX_BRANCH_DEPTH) {
+                // Requirement 4: the block cannot be fully analyzed, but we
+                // must not produce false UNINIT positives.  Scan the remaining
+                // tokens for any assignment to a variable and remove it from
+                // both ctx.state and ctx.uninits — if the variable is assigned
+                // somewhere in the unanalyzed block it may be initialized.
+                // Removing from ctx.state is critical: without this, the UNINIT
+                // value from the declaration stays in state and merges as
+                // Possible(UNINIT) at the join point, producing a false positive
+                // even when every branch of an if-else-if chain assigns the
+                // variable (Requirement 4, false negatives preferred over FPs).
+                for (const Token* t = tok; t && t != end; t = t->next()) {
+                    if (t->isAssignmentOp() && t->astOperand1() &&
+                        t->astOperand1()->varId() > 0) {
+                        const nonneg int vid = t->astOperand1()->varId();
+                        ctx.uninits.erase(vid);
+                        ctx.state.erase(vid);
+                    }
+                }
+                return;
+            }
 
             const Token* parenOpen = tok->next();
             if (!parenOpen || parenOpen->str() != "(")

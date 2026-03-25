@@ -2650,6 +2650,32 @@ private:
             // carried the Known-empty state through the early-return guard.
             ASSERT(!testContainerSizeKnown(code, 6, 0, containerSettings));
         }
+
+        // FP22: variable assigned in every branch of a deep if-else-if chain
+        //       (5 levels) that exceeds MAX_BRANCH_DEPTH must NOT be reported
+        //       as uninitialized after the chain.
+        //       Regression for test1.c (assembly-style number parser):
+        //         long radix;
+        //         if (A) radix=16; else if (B) radix=16; else if (C) radix=16;
+        //         else if (D) radix=8; else if (E) radix=2; else radix=10;
+        //         radix++;   ← false positive uninitvar
+        //       Root cause: the analysis aborts at MAX_BRANCH_DEPTH=4 without
+        //       processing assignments in the innermost else-block, leaving
+        //       the variable in ctx.uninits.
+        {
+            const char code[] = "void f(int a, int b, int c, int d, int e) {\n"  // 1
+                                "  int x;\n"                                       // 2
+                                "  if (a)        x = 1;\n"                        // 3
+                                "  else if (b)   x = 2;\n"                        // 4
+                                "  else if (c)   x = 3;\n"                        // 5
+                                "  else if (d)   x = 4;\n"                        // 6
+                                "  else if (e)   x = 5;\n"                        // 7
+                                "  else          x = 6;\n"                        // 8
+                                "  (void)x;\n"                                    // 9
+                                "}\n";
+            // x is assigned on every path — must NOT be reported as UNINIT.
+            ASSERT(!testValueOfXUninit(code, 9));
+        }
     }
 };
 
