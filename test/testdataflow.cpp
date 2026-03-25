@@ -1333,6 +1333,21 @@ private:
                                 "}\n";
             ASSERT(testValueOfXUninit(code, 9));
         }
+
+        // U11: assignment inside an if-condition clears UNINIT — the assignment
+        //      "x = expr" in "if ((x = expr) != 0)" always executes before
+        //      branching, so x is initialized on both branches.
+        //      Reproduces the false positive: "Uninitialized variable: Result"
+        //      reported for code like "if ((Result = a - b) != 0) return Result;"
+        {
+            const char code[] = "int getValue();\n"                   // 1
+                                "void f() {\n"                        // 2
+                                "  int x;\n"                          // 3  ← declared without init
+                                "  if ((x = getValue()) != 0)\n"      // 4  ← x assigned in condition
+                                "    (void)x;\n"                      // 5  ← x must NOT be UNINIT here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 
     // -----------------------------------------------------------------------

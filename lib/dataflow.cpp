@@ -1892,6 +1892,19 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
             }
 
+            // Phase U-CA: plain assignment in the condition — "(x = expr)" always
+            // executes before branching, so x is initialized on both branches.
+            // Example: "if ((Result = a - b) != 0) return Result;" must NOT
+            // report Result as uninitialized.  The condition tokens are not
+            // visited by the main token-walker, so handle them here.
+            for (const Token* ct = parenOpen->next(); ct && ct != parenClose; ct = ct->next()) {
+                if (ct->str() == "=" && ct->astOperand1() && ct->astOperand1()->varId() > 0) {
+                    const nonneg int varId = ct->astOperand1()->varId();
+                    ctx.uninits.erase(varId);
+                    ctx.state.erase(varId);
+                }
+            }
+
             // Phase UA: annotate variable reads in the if-condition.
             //
             // Requirement: The main token-walker never visits condition tokens —
