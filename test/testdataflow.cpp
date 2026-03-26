@@ -2945,6 +2945,36 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 4));
         }
+
+        // FP29: variable assigned in if-block before a goto must NOT be
+        //       reported as uninitialized at the goto label.
+        //       Regression for test1.c (Linux kernel error-handling pattern):
+        //         int err;
+        //         if (a()) { err = -1; goto out; }
+        //         return 0;
+        //       out:
+        //         return err;  ← false positive uninitvar
+        //       Root cause 1: goto is not listed as a block terminator in
+        //       blockTerminates(), so the then-branch (err=assigned) and the
+        //       implicit else-branch (err=UNINIT) are merged as Possible(UNINIT).
+        //       Root cause 2: the label is a goto target where err is always
+        //       assigned, but the analysis propagates the merged Possible(UNINIT)
+        //       state past the label and re-injects UNINIT after b().
+        //       Fix: (1) treat goto as a block terminator; (2) clear UNINIT
+        //       state at goto labels (conservative — false negatives preferred).
+        {
+            const char code[] = "int a();\n"                         // 1
+                                "void b();\n"                        // 2
+                                "int f() {\n"                        // 3
+                                "  int x;\n"                         // 4
+                                "  if (a()) { x = -1; goto out; }\n" // 5
+                                "  return 0;\n"                      // 6
+                                "  out:\n"                           // 7
+                                "  b();\n"                           // 8
+                                "  return x;\n"                      // 9  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 9));
+        }
     }
 };
 

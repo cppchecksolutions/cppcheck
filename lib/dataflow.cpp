@@ -1192,7 +1192,11 @@ static bool blockTerminates(const Token* start, const Token* end) {
 
     for (const Token* tok = start; tok && tok != end; tok = tok->next()) {
         // Check for explicit termination keywords at statement level.
-        if (Token::Match(tok, "return|throw|break|continue"))
+        // goto transfers control unconditionally, so it terminates the block
+        // just like return/throw/break/continue (Requirement 4: treat the
+        // goto-target label as reachable only via the goto path, not via
+        // fall-through — prevents false UNINIT merges across goto jumps).
+        if (Token::Match(tok, "return|throw|break|continue|goto"))
             return true;
 
         // Check whether an if-else statement terminates all paths.
@@ -3036,6 +3040,42 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             const Token* operand = tok->astOperand1();
             if (operand && operand->varId() > 0)
                 ctx.addressTaken.insert(operand->varId());
+        }
+
+        // =================================================================
+        // Goto label: clear UNINIT state (Phase U-goto)
+        // =================================================================
+        // A label is a goto jump target.  Execution may arrive here from a
+        // goto on a path where variables were already assigned — a state we
+        // cannot determine without inter-block goto tracking.  Propagating
+        // the fall-through Possible(UNINIT) state past a label into the label
+        // body produces false positives (Requirement 4).  Clearing UNINIT
+        // values and removing variables from ctx.uninits here prevents that.
+        //
+        // This is conservative in the "false negatives over false positives"
+        // direction: real uninitialized-variable bugs that only manifest after
+        // a goto label may be missed (false negative, acceptable per policy).
+        //
+        // Pattern: previous token is ';', '{', or '}', and current token is a
+        // name followed by ':', and is not a 'case'/'default' label.
+        if (tok->isName() && tok->str() != "case" && tok->str() != "default" &&
+            tok->next() && tok->next()->str() == ":" &&
+            tok->previous() &&
+            (tok->previous()->str() == ";" || tok->previous()->str() == "{" ||
+             tok->previous()->str() == "}")) {
+            // Clear UNINIT entries so Phase U2 does not re-inject after calls,
+            // and clear state entries carrying stale UNINIT values.
+            ctx.uninits.clear();
+            for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
+                const bool hasUninit = std::any_of(it->second.begin(), it->second.end(),
+                    [](const ValueFlow::Value& v) {
+                        return v.valueType == ValueFlow::Value::ValueType::UNINIT;
+                    });
+                if (hasUninit)
+                    it = ctx.state.erase(it);
+                else
+                    ++it;
+            }
         }
 
         // =================================================================
