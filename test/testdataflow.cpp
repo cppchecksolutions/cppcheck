@@ -1500,6 +1500,78 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // U20 (FP): "sentinel variable" while-loop pattern.
+        //   The while condition is "!done" where done has no top-level assignment
+        //   in the loop body — the loop can only exit via a conditional branch
+        //   (the else-block) that also assigns x.  x is therefore always
+        //   initialized when the loop exits.
+        //   Phase NW3 must NOT re-inject UNINIT for x, and Phase U2 must NOT
+        //   re-inject it after the subsequent function call.
+        //   Reproduces: false positive "Uninitialized variable: x" reported on
+        //   the return statement in a typical GTK-style dialog loop pattern.
+        {
+            const char code[] = "void a(int);\n"                      // 1
+                                "void f() {\n"                        // 2
+                                "  int done, x;\n"                    // 3  ← both declared without init
+                                "  done = 0;\n"                       // 4  ← done initialized before loop
+                                "  while (!done) {\n"                 // 5
+                                "    if (a(1) == 2) {\n"              // 6
+                                "      a(1);\n"                       // 7  ← no assignment to done or x
+                                "    } else {\n"                      // 8
+                                "      x = 0;\n"                      // 9  ← x assigned
+                                "      done = 1;\n"                   // 10 ← done assigned (exit trigger)
+                                "    }\n"                             // 11
+                                "  }\n"                               // 12
+                                "  a(1);\n"                          // 13 ← function call (triggers U2)
+                                "  (void)x;\n"                       // 14 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 14));
+        }
+
+        // U21 (FP): same "sentinel variable" pattern as U20 but using
+        //   for (; !done; ) — semantically equivalent to while (!done).
+        {
+            const char code[] = "void a(int);\n"                      // 1
+                                "void f() {\n"                        // 2
+                                "  int done, x;\n"                    // 3
+                                "  done = 0;\n"                       // 4
+                                "  for (; !done; ) {\n"               // 5
+                                "    if (a(1) == 2) {\n"              // 6
+                                "      a(1);\n"                       // 7
+                                "    } else {\n"                      // 8
+                                "      x = 0;\n"                      // 9
+                                "      done = 1;\n"                   // 10
+                                "    }\n"                             // 11
+                                "  }\n"                               // 12
+                                "  a(1);\n"                          // 13 ← triggers U2
+                                "  (void)x;\n"                       // 14 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 14));
+        }
+
+        // U22 (FP): same "sentinel variable" pattern as U20 but with do-while.
+        //   do { ... } while (!done) — the body always runs at least once, and
+        //   the only way the loop exits is via the else-branch that also assigns x.
+        //   Phase U2 must NOT re-inject UNINIT for x after the subsequent call.
+        {
+            const char code[] = "void a(int);\n"                      // 1
+                                "void f() {\n"                        // 2
+                                "  int done, x;\n"                    // 3
+                                "  done = 0;\n"                       // 4
+                                "  do {\n"                            // 5
+                                "    if (a(1) == 2) {\n"              // 6
+                                "      a(1);\n"                       // 7
+                                "    } else {\n"                      // 8
+                                "      x = 0;\n"                      // 9
+                                "      done = 1;\n"                   // 10
+                                "    }\n"                             // 11
+                                "  } while (!done);\n"                // 12
+                                "  a(1);\n"                          // 13 ← triggers U2
+                                "  (void)x;\n"                       // 14 ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 14));
+        }
     }
 
     // -----------------------------------------------------------------------

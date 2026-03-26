@@ -193,7 +193,8 @@
  *   8. applyConditionConstraint — derive state update from a condition
  *   9. dropWrittenVars / hasTopLevelAssignment / collectWhileExitConstraints
  *        Loop body helpers (Requirement 4)
- *  9d. resolveCondInits / recordConditionalInits — Phase U-CI helpers
+ *  9d. suppressUninitForSentinelLoop — Phase NW3b helper (all loop types)
+ *  9e. resolveCondInits / recordConditionalInits — Phase U-CI helpers
  *  10. forwardAnalyzeBlock  — Pass 1 (forward walk, all phases)
  *  11. backwardAnalyzeBlock — Pass 2 (backward walk, int/ptr constraints)
  *  12. DataFlow::setValues  — public entry point
@@ -1569,7 +1570,64 @@ static bool hasTopLevelAssignment(nonneg int varId,
 
 
 // ===========================================================================
-// 9c. collectWhileExitConstraints (Phase NW)
+// 9d. suppressUninitForSentinelLoop (Phase NW3b)
+// ===========================================================================
+
+/// Phase NW3b: suppress UNINIT re-injection for the "sentinel variable" loop
+/// pattern — a loop whose exit condition variable is only modified inside
+/// conditional branches of the body (never at the top level).
+///
+/// When the condition variable has no top-level assignment in the loop body
+/// the loop can only exit via a conditional branch.  Variables that are in
+/// ctx.uninits AND were erased from ctx.state by dropWrittenVars (i.e.
+/// assigned somewhere in the loop body, but only inside a nested block) are
+/// removed from ctx.uninits so that Phase U2 does not re-inject UNINIT for
+/// them after subsequent function calls.
+///
+/// condFirst — first token of the loop condition expression:
+///   "while (!done)"          → condOpen->astOperand2()  (the '!' token)
+///   "do {} while (!done)"    → wCond->astOperand2()     (the '!' token)
+///   "for (; !done; )"        → forCondFirst             (first token of cond clause)
+///
+/// bodyFirst, bodyEnd — range of the loop body content passed to
+///   hasTopLevelAssignment to check for conditional-only assignments.
+///
+/// Requirement 4: false negatives are preferred over false positives.
+/// Called before Phase NW3 re-injection (while-loop) so that NW3 naturally
+/// skips variables already removed from ctx.uninits.
+static void suppressUninitForSentinelLoop(const Token* condFirst,
+                                          const Token* bodyFirst,
+                                          const Token* bodyEnd,
+                                          DFContext& ctx) {
+    if (!condFirst)
+        return;
+    // Extract the condition variable from simple patterns: "var" or "!var".
+    nonneg int condVarId = 0;
+    if (isTrackedVar(condFirst) || isTrackedPtrVar(condFirst))
+        condVarId = condFirst->varId();
+    else if (condFirst->str() == "!" && condFirst->astOperand1() &&
+             !condFirst->astOperand2() &&
+             (isTrackedVar(condFirst->astOperand1()) ||
+              isTrackedPtrVar(condFirst->astOperand1())))
+        condVarId = condFirst->astOperand1()->varId();
+    if (condVarId == 0)
+        return;  // complex condition — can't identify variable; keep existing behaviour
+    if (hasTopLevelAssignment(condVarId, bodyFirst, bodyEnd))
+        return;  // condition var has a top-level assignment — loop may exit without
+                 // the conditional branch, so NW3 re-injection is still appropriate
+    // Remove NW3 candidates from ctx.uninits to prevent Phase U2 re-injection.
+    for (auto it = ctx.uninits.begin(); it != ctx.uninits.end(); ) {
+        if (ctx.state.find(*it) == ctx.state.end() &&
+            !hasTopLevelAssignment(*it, bodyFirst, bodyEnd))
+            it = ctx.uninits.erase(it);
+        else
+            ++it;
+    }
+}
+
+
+// ===========================================================================
+// 9e. collectWhileExitConstraints (Phase NW)
 // ===========================================================================
 
 /// Phase NW: Inject Possible null (0) values for pointer null-guards found in
@@ -2257,6 +2315,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 return;  // too deeply nested — abort (requirement 4)
 
             const Token* bodyOpen = nullptr;
+            const Token* forCondFirst = nullptr;  // Phase NW3b: first token of for-loop condition
             if (tok->str() == "do") {
                 // do { body } while (cond);
                 bodyOpen = tok->next();
@@ -2352,6 +2411,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 break;
                             condEnd = condEnd->next();
                         }
+                        // Phase NW3b: record the first token of the condition so
+                        // we can extract the condition variable after bodyClose is set.
+                        if (initEnd->next() != condEnd)
+                            forCondFirst = initEnd->next();
                         for (const Token* t = initEnd->next(); t && t != condEnd; t = t->next()) {
                             if (t->isAssignmentOp()) {
                                 const Token* lhs = t->astOperand1();
@@ -2432,6 +2495,14 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // condRoot is stored in value.condition so that the
                         // error message can reference the loop condition as the
                         // reason for the possible uninit.
+                        //
+                        // Phase NW3b: run BEFORE the re-injection loop below so
+                        // that sentinel-variable candidates are removed from
+                        // ctx.uninits first; NW3 then naturally skips them.
+                        suppressUninitForSentinelLoop(condRoot,
+                                                      bodyOpen->next(),
+                                                      bodyClose, ctx);
+
                         for (const nonneg int varId : ctx.uninits) {
                             if (ctx.state.find(varId) != ctx.state.end())
                                 continue;  // still has a value — not erased
@@ -2448,6 +2519,12 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     }
                 }
             }
+
+            // Phase NW3b for for-loops: "for (; !done; )" is equivalent to
+            // "while (!done)" — apply the same sentinel-variable suppression.
+            if (tok->str() == "for")
+                suppressUninitForSentinelLoop(forCondFirst,
+                                              bodyOpen->next(), bodyClose, ctx);
 
             // Skip the loop body in the outer walk (already handled above).
             tok = const_cast<Token*>(bodyClose);
@@ -2473,6 +2550,11 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // Inject null constraints on do-while loop exit
                         // (same logic as the regular while handler above).
                         applyLoopExitConstraints(wCond->astOperand2(), ctx);
+
+                        // Phase NW3b for do-while: same sentinel-variable suppression.
+                        suppressUninitForSentinelLoop(wCond->astOperand2(),
+                                                      bodyOpen->next(),
+                                                      bodyClose, ctx);
                     }
                 }
             }
