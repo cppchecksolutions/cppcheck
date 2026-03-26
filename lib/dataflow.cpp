@@ -474,6 +474,15 @@ static bool isFunctionCallOpen(const Token* tok) {
         if (afterOpen && afterOpen->str() == "*")
             return true;
     }
+    // Template function call: name<args>(args), e.g. "Calc<true>(x, y)".
+    // The tokenizer sets Token::link() on the closing '>' of a template
+    // argument list so that '>' with a link means a template close, not a
+    // comparison operator.  This handles calls of the form:
+    //   func<T>(args)
+    //   Scope::func<T>(args)
+    //   obj.func<T>(args)
+    if (prev->str() == ">" && prev->link())
+        return true;
     return false;
 }
 

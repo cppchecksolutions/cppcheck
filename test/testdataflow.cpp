@@ -1830,6 +1830,22 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // U2.6: variable passed to a template function call must NOT be flagged
+        //       as UNINIT after the call.  The template call "Tmpl<T>(x, y)"
+        //       has '>' as the token before '('; isFunctionCallOpen must
+        //       recognise template calls so the state is cleared/re-injected
+        //       correctly (Phase U2).
+        {
+            const char code[] = "template<bool B> void calc(double, double&);\n"  // 1
+                                "void f() {\n"                                     // 2
+                                "  double x;\n"                                    // 3
+                                "  double v = 0;\n"                                // 4
+                                "  calc<true>(v, x);\n"                            // 5  ← template call initializes x
+                                "  (void)x;\n"                                     // 6  ← NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 
     // -----------------------------------------------------------------------
