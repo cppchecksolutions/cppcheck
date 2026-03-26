@@ -309,6 +309,25 @@ private:
         return false;
     }
 
+    /// Overload: same as above but uses a caller-supplied Settings instance.
+    /// Needed for FP tests that require a library (e.g. std.cfg) to recognise
+    /// noreturn functions such as exit().
+    bool testValueOfXUninit_(const char* file, int line, const char code[],
+                             unsigned int linenr, const Settings& s) {
+        SimpleTokenizer tokenizer(s, *this);
+        ASSERT_LOC(tokenizer.tokenize(code), file, line);
+        for (const Token* tok = tokenizer.tokens(); tok; tok = tok->next()) {
+            if (tok->str() != "x" || tok->linenr() != linenr)
+                continue;
+            if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                            [](const ValueFlow::Value& v) {
+                return v.isUninitValue();
+            }))
+                return true;
+        }
+        return false;
+    }
+
     /// Requirement: the cast token '(' at linenr has a Known integer value
     /// equal to `value`.  Phase Cast: verifies cast-expression token annotation.
 #define testCastKnown(...) testCastKnown_(__FILE__, __LINE__, __VA_ARGS__)
@@ -2990,6 +3009,31 @@ private:
                                 "  return x;\n"                      // 9  must NOT be UNINIT
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 9));
+        }
+
+        // FP30: variable initialized in the then-branch of an if/else where
+        //       the else-branch calls a noreturn library function (exit).
+        //       blockTerminates must recognise exit() as a terminator so only
+        //       the then-branch state survives to the join point.
+        //       Regression for test1.c pattern:
+        //         int deffile;
+        //         if ((s = cl_arg(1)) != NULL) { deffile = 0; } else { exit(1); }
+        //         write_ptrfile(ptrfile, deffile);  ← false positive uninitvar
+        {
+            const Settings stdSettings =
+                settingsBuilder().checkLevel(Settings::CheckLevel::normal)
+                                 .library("std.cfg")
+                                 .build();
+            const char code[] = "void f(int c) {\n"   // 1
+                                "  int x;\n"           // 2
+                                "  if (c) {\n"         // 3
+                                "    x = 1;\n"         // 4
+                                "  } else {\n"         // 5
+                                "    exit(1);\n"       // 6
+                                "  }\n"                // 7
+                                "  (void)x;\n"         // 8  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 8, stdSettings));
         }
     }
 };

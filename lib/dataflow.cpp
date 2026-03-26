@@ -204,6 +204,7 @@
 
 #include "astutils.h"
 #include "mathlib.h"
+#include "settings.h"
 #include "symboldatabase.h"
 #include "token.h"
 #include "tokenlist.h"
@@ -1180,12 +1181,16 @@ static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
 // ===========================================================================
 
 /// Returns true when every execution path through [start, end) ends with an
-/// unconditional exit: return, throw, break, or continue.
+/// unconditional exit: return, throw, break, continue, goto, or a call to a
+/// noreturn library function (e.g. exit(), abort()).
 ///
-/// Top-level return/throw/break/continue are detected directly.  In addition,
-/// an if-else statement where BOTH the then-block and the else-block terminate
-/// (checked recursively) is treated as a terminator — this handles the
-/// "else-if chain" pattern where the tokenizer has converted
+/// Top-level return/throw/break/continue/goto are detected directly.  When
+/// `settings` is non-null, top-level calls to functions that are marked
+/// noreturn in the library configuration (Library::isnoreturn()) are also
+/// treated as terminators.  In addition, an if-else statement where BOTH the
+/// then-block and the else-block terminate (checked recursively) is treated as
+/// a terminator — this handles the "else-if chain" pattern where the tokenizer
+/// has converted
 ///   "else if (...) { return; } else { return; }"
 /// into
 ///   "else { if (...) { return; } else { return; } }"
@@ -1195,7 +1200,8 @@ static DFContext mergeContexts(const DFContext& c1, const DFContext& c2) {
 /// Used by forwardAnalyzeBlock to detect when a branch exits its scope,
 /// allowing the analysis to use the surviving-path state directly rather than
 /// merging with a dead state.
-static bool blockTerminates(const Token* start, const Token* end) {
+static bool blockTerminates(const Token* start, const Token* end,
+                            const Settings* settings = nullptr) {
     if (!start || !end || start == end)
         return false;
 
@@ -1206,6 +1212,16 @@ static bool blockTerminates(const Token* start, const Token* end) {
         // goto-target label as reachable only via the goto path, not via
         // fall-through — prevents false UNINIT merges across goto jumps).
         if (Token::Match(tok, "return|throw|break|continue|goto"))
+            return true;
+
+        // Phase NR: noreturn function call (e.g. exit(), abort()).
+        // Requires library configuration; if settings is null we skip this
+        // check (conservative — may produce false negatives, never FP).
+        // Requirement 4: only check plain name tokens with no varId (function
+        // names, not variables) followed by a function-call opening '('.
+        if (settings && tok->isName() && !tok->varId() &&
+            tok->next() && isFunctionCallOpen(tok->next()) &&
+            settings->library.isnoreturn(tok))
             return true;
 
         // Check whether an if-else statement terminates all paths.
@@ -1230,8 +1246,8 @@ static bool blockTerminates(const Token* start, const Token* end) {
                 const Token* elseOpen  = afterThen->next();
                 const Token* elseClose = elseOpen ? elseOpen->link() : nullptr;
                 if (elseClose &&
-                    blockTerminates(thenOpen->next(), thenClose) &&
-                    blockTerminates(elseOpen->next(), elseClose)) {
+                    blockTerminates(thenOpen->next(), thenClose, settings) &&
+                    blockTerminates(elseOpen->next(), elseClose, settings)) {
                     // Both branches terminate — the if-else is an unconditional exit.
                     return true;
                 }
@@ -2011,7 +2027,8 @@ static void clearConditionOutVars(const Token* condOpen, const Token* condClose,
 // Forward declaration — needed because if-branches recurse.
 static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 DFContext& ctx,
-                                int branchDepth, int loopDepth);
+                                int branchDepth, int loopDepth,
+                                const Settings* settings = nullptr);
 
 /// Forward analysis pass: walk [start, end) in program order.
 ///
@@ -2038,7 +2055,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 ///   C  — container size tracking
 static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 DFContext& ctx,
-                                int branchDepth, int loopDepth) {
+                                int branchDepth, int loopDepth,
+                                const Settings* settings /*= nullptr*/) {
     for (Token* tok = start; tok && tok != end; tok = tok->next()) {
 
         // --- Abort if state has grown too large (requirement 4) ---
@@ -2295,8 +2313,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 
             // Analyse the then-block.
             forwardAnalyzeBlock(const_cast<Token*>(thenOpen->next()), thenClose,
-                                ctxThen, branchDepth + 1, loopDepth);
-            const bool thenTerminates = blockTerminates(thenOpen->next(), thenClose);
+                                ctxThen, branchDepth + 1, loopDepth, settings);
+            const bool thenTerminates = blockTerminates(thenOpen->next(), thenClose, settings);
 
             // Check for else / else-if.
             const Token* afterThen = thenClose->next();
@@ -2309,8 +2327,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     return;
 
                 forwardAnalyzeBlock(const_cast<Token*>(elseOpen->next()), elseClose,
-                                    ctxElse, branchDepth + 1, loopDepth);
-                const bool elseTerminates = blockTerminates(elseOpen->next(), elseClose);
+                                    ctxElse, branchDepth + 1, loopDepth, settings);
+                const bool elseTerminates = blockTerminates(elseOpen->next(), elseClose, settings);
 
                 // Merge: keep only the context from paths that reach the join point.
                 if (thenTerminates && !elseTerminates) {
@@ -3352,7 +3370,6 @@ void setValues(TokenList& tokenlist,
                const Settings& settings,
                TimerResultsIntf* timerResults) {
     DF_UNUSED(errorLogger);
-    DF_UNUSED(settings);
     DF_UNUSED(timerResults);
 
     // Requirement: annotate every integer and float literal token with its
@@ -3392,7 +3409,7 @@ void setValues(TokenList& tokenlist,
         {
             DFContext fwdCtx;  // all fields default-initialised (empty)
             forwardAnalyzeBlock(bodyFirst, bodyEnd, fwdCtx,
-                                /*branchDepth=*/0, /*loopDepth=*/0);
+                                /*branchDepth=*/0, /*loopDepth=*/0, &settings);
         }
 
         // -----------------------------------------------------------------
