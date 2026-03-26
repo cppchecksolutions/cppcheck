@@ -1518,12 +1518,33 @@ static void dropWrittenVars(const Token* start, const Token* end, DFContext& ctx
             ctx.state.erase(t->astOperand1()->varId());
         // Phase C: container method call in loop body — drop the container size.
         // Any mutation method makes the size unpredictable over loop iterations.
+        // Phase U2: &var argument to a function call — the callee may initialize
+        // the variable through the pointer.  Remove from ctx.uninits so that
+        // Phase U2 does not re-inject UNINIT after subsequent function calls,
+        // and erase from ctx.state so any stale UNINIT value is cleared.
+        // Requirement 4: false negatives are preferred over false positives;
+        // assuming the callee initializes &var is conservative in that direction.
         if (isFunctionCallOpen(t)) {
             const Token* funcExpr = t->astOperand1();
             if (funcExpr && funcExpr->str() == "." && funcExpr->astOperand1()) {
                 const Token* objTok = funcExpr->astOperand1();
                 if (objTok && objTok->varId() > 0)
                     ctx.containers.erase(objTok->varId());
+            }
+            for (const Token* argTok = t->next();
+                 argTok && argTok != t->link();
+                 argTok = argTok->next()) {
+                if (argTok->str() == "(" && argTok->link()) {
+                    argTok = argTok->link();
+                    continue;
+                }
+                if (argTok->isUnaryOp("&")) {
+                    const Token* operand = argTok->astOperand1();
+                    if (operand && operand->varId() > 0) {
+                        ctx.state.erase(operand->varId());
+                        ctx.uninits.erase(operand->varId());
+                    }
+                }
             }
         }
     }

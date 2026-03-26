@@ -1572,6 +1572,30 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 14));
         }
+
+        // U23 (FP): variable initialized either via &var to a function call
+        //           inside a for-loop body, or by a flag-guarded fallback
+        //           assignment after the loop.
+        //           dropWrittenVars must detect that &x is passed to the callee
+        //           (a potential out-parameter) and remove x from ctx.uninits,
+        //           so that Phase U2 does not re-inject UNINIT after the loop.
+        {
+            const char code[] = "int read_int(const char *, int *);\n" // 1
+                                "void f(char **argv) {\n"               // 2
+                                "  int flag = 0;\n"                     // 3
+                                "  int x;\n"                            // 4  ← declared without init
+                                "  for (++argv; *argv; argv++) {\n"     // 5
+                                "    if (!flag && !read_int(*argv, &x))\n" // 6  ← &x out-param
+                                "      flag = 1;\n"                     // 7
+                                "    else\n"                            // 8
+                                "      return;\n"                       // 9
+                                "  }\n"                                 // 10
+                                "  if (!flag)\n"                        // 11
+                                "    x = 1;\n"                         // 12  ← fallback init
+                                "  (void)x;\n"                         // 13  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 13));
+        }
     }
 
     // -----------------------------------------------------------------------
