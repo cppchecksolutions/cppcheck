@@ -442,19 +442,39 @@ static bool isLhsOfAssignment(const Token* tok) {
 /// Keywords that use '(' (if, for, while, …) are excluded.
 /// This is used to conservatively clear state on any call site because a
 /// called function might modify variables through pointers or global state.
+///
+/// Two call forms are recognised:
+///   name(args)        — ordinary call: prev is a name token
+///   (*expr)(args)     — function-pointer call: prev is ')' closing the
+///                       dereferenced function-pointer expression
+/// For the second form only: the opening '(' of the preceding expression
+/// must immediately be followed by '*', so that "(type)(expr)" cast
+/// expressions (where prev->link()->next() is a type keyword, not '*')
+/// are not mistaken for function calls.
 static bool isFunctionCallOpen(const Token* tok) {
     if (!tok || tok->str() != "(")
         return false;
     const Token* prev = tok->previous();
-    if (!prev || !prev->isName())
+    if (!prev)
         return false;
-    // Exclude control-flow keywords
-    if (Token::Match(prev, "if|for|while|do|switch|return|catch|throw"))
-        return false;
-    // Exclude type-cast expressions: "(int)x" — prev is a type keyword
-    if (prev->isStandardType())
-        return false;
-    return true;
+    if (prev->isName()) {
+        // Exclude control-flow keywords
+        if (Token::Match(prev, "if|for|while|do|switch|return|catch|throw"))
+            return false;
+        // Exclude type-cast expressions: "(int)x" — prev is a type keyword
+        if (prev->isStandardType())
+            return false;
+        return true;
+    }
+    // Function-pointer call: (*f)(args), (*obj->fn)(args), etc.
+    // The preceding ')' closes the parenthesised function-pointer expression,
+    // whose first token after '(' is '*' (the dereference operator).
+    if (prev->str() == ")" && prev->link()) {
+        const Token* afterOpen = prev->link()->next();
+        if (afterOpen && afterOpen->str() == "*")
+            return true;
+    }
+    return false;
 }
 
 
@@ -1949,12 +1969,17 @@ static void clearCallClobberableState(DFContext& ctx) {
 ///
 /// Phase U-WC2: clears stale UNINIT so that reads after the loop are not
 /// falsely flagged as uninitialized.
+///
+/// Also marks address-taken variables in ctx.addressTaken so that subsequent
+/// clearCallClobberableState calls (e.g. in the if-condition Pass 2 handler)
+/// correctly exclude them from the "safe to preserve" set.
 static void clearConditionOutVars(const Token* condOpen, const Token* condClose,
                                   DFContext& ctx) {
     for (const Token* ct = condOpen->next(); ct && ct != condClose; ct = ct->next()) {
         if (ct->isUnaryOp("&")) {
             const Token* operand = ct->astOperand1();
             if (operand && operand->varId() > 0) {
+                ctx.addressTaken.insert(operand->varId());
                 ctx.uninits.erase(operand->varId());
                 ctx.state.erase(operand->varId());
             }
@@ -2147,18 +2172,13 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             //             inner calls redundantly.
             // ----------------------------------------------------------------
 
-            // Pass 1: collect address-taken variables from the condition.
-            // Any variable whose address is taken (&var) can be modified
-            // by a called function, so it must not be preserved across calls.
-            for (const Token* ct = parenOpen->next();
-                 ct && ct != parenClose; ct = ct->next()) {
-                // Unary '&': no right-hand operand in the AST.
-                if (ct->str() == "&" && !ct->astOperand2()) {
-                    const Token* operand = ct->astOperand1();
-                    if (operand && operand->varId() > 0)
-                        ctx.addressTaken.insert(operand->varId());
-                }
-            }
+            // Pass 1: collect address-taken variables and clear UNINIT for
+            // out-parameter variables in the condition.
+            // Delegates to clearConditionOutVars which handles &var (marks
+            // addressTaken, erases from uninits/state) and ref-out parameters
+            // of recognised function calls — including function-pointer calls
+            // such as "(*f)(&x)" (Requirement 4 — false negatives over FPs).
+            clearConditionOutVars(parenOpen, parenClose, ctx);
 
             // Pass 2: for each function call in the condition, conservatively
             // clear the state (same logic as for statement-level calls).
@@ -2445,6 +2465,11 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 }
                             }
                         }
+                        // Phase U-WC2 (for-loop): &var and non-const reference args
+                        // in function calls inside the condition execute unconditionally
+                        // at least once, so the callee may initialize those variables.
+                        // Mirrors the same treatment for while/do-while conditions.
+                        clearConditionOutVars(initEnd, condEnd, ctx);
                     }
                 }
             }

@@ -2860,6 +2860,73 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 13));
         }
+
+        // FP25: variables initialized via address-of in a function-pointer call
+        //       used as the if-condition must NOT be reported as uninitialized.
+        //       Regression for test1.c (fcitx input-method pattern):
+        //         int x; int y;
+        //         if ((*f)(0, &x, &y)) { use(x, y); }  ← false positive uninitvar y
+        //       Root cause: isFunctionCallOpen returns false for "(*f)(" because
+        //       the token preceding the argument-list '(' is ')' (not a name).
+        //       Pass 2 of the condition scan therefore never recognises the call,
+        //       so &x/&y are never treated as out-parameters, and UNINIT is not
+        //       cleared from ctx.uninits before forking into the then-branch.
+        {
+            const char code[] = "int (*f)(int, int*, int*);\n"  // 1
+                                "void use(int, int);\n"         // 2
+                                "void foo() {\n"                // 3
+                                "  int x;\n"                    // 4
+                                "  int y;\n"                    // 5
+                                "  if ((*f)(0, &x, &y)) {\n"   // 6
+                                "    use(x, y);\n"              // 7  must NOT be UNINIT
+                                "  }\n"                         // 8
+                                "}\n";
+            // y is passed as &y to the function — must NOT be reported as UNINIT.
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
+
+        // FP26: variables initialized via address-of in a function-pointer call
+        //       used as a standalone statement must NOT be reported as uninitialized.
+        //       Same root pattern as FP25 but without the wrapping if-condition.
+        //       Regression for test1.c (fcitx input-method pattern, direct call form):
+        //         int x; int y;
+        //         (*f)(0, &x, &y);
+        //         use(x, y);   ← false positive uninitvar y
+        //       Root cause: isFunctionCallOpen returned false for "(*f)(" because
+        //       the token before the argument-list '(' is ')' (not a name), so the
+        //       entire statement-level function-call handler was skipped.
+        {
+            const char code[] = "int (*f)(int, int*, int*);\n"  // 1
+                                "void use(int, int);\n"         // 2
+                                "void foo() {\n"                // 3
+                                "  int x;\n"                    // 4
+                                "  int y;\n"                    // 5
+                                "  (*f)(0, &x, &y);\n"         // 6
+                                "  use(x, y);\n"               // 7  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
+
+        // FP27: variables initialized via address-of in a function-pointer call
+        //       used as a for-loop condition must NOT be reported as uninitialized.
+        //       Regression for test1.c (fcitx input-method pattern, for-loop form):
+        //         int x; int y;
+        //         for (;(*f)(0, &x, &y););
+        //         use(x, y);   ← false positive uninitvar y
+        //       Root cause: the for-loop condition clause scan (Phase U2-FC) only
+        //       handled assignment operators, not function calls with &var arguments.
+        //       clearConditionOutVars was called for while/do-while but not for-loops.
+        {
+            const char code[] = "int (*f)(int, int*, int*);\n"  // 1
+                                "void use(int, int);\n"         // 2
+                                "void foo() {\n"                // 3
+                                "  int x;\n"                    // 4
+                                "  int y;\n"                    // 5
+                                "  for (;(*f)(0, &x, &y););\n" // 6
+                                "  use(x, y);\n"               // 7  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
     }
 };
 
