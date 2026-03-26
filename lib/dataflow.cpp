@@ -2798,6 +2798,20 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 
             // Simple variable assignment
             if (lhs->varId() == 0) {
+                // Phase DA: *&var = value is equivalent to var = value.
+                // When the LHS is a dereference ('*') of an address-of ('&')
+                // applied to a simple variable, the assignment initializes that
+                // variable.  Requirement 4: only handle the exact *&var pattern
+                // (no deeper nesting) to avoid false negatives for other deref
+                // assignments (e.g. *ptr = value where ptr is not &var).
+                if (lhs->str() == "*" && lhs->astOperand1() &&
+                    lhs->astOperand1()->str() == "&" &&
+                    lhs->astOperand1()->astOperand1() &&
+                    lhs->astOperand1()->astOperand1()->varId() > 0) {
+                    const nonneg int vid = lhs->astOperand1()->astOperand1()->varId();
+                    ctx.uninits.erase(vid);
+                    ctx.state.erase(vid);
+                }
                 continue;  // complex LHS (array subscript, deref, etc.) — skip
             }
 

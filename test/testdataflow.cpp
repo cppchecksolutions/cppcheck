@@ -2927,6 +2927,24 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 7));
         }
+
+        // FP28: assignment through *& (dereference of address-of) must be
+        //       recognized as initializing the variable.
+        //       Regression for test1.cpp:
+        //         int mode;
+        //         *&mode = 1;   ← this DOES initialize mode
+        //         ++mode;       ← false positive uninitvar
+        //       Root cause: the assignment handler only handles lhs->varId() > 0
+        //       (simple variable LHS); for *&var the LHS is '*' with varId==0,
+        //       so the assignment was skipped and mode remained UNINIT in state.
+        {
+            const char code[] = "void f() {\n"  // 1
+                                "  int x;\n"    // 2
+                                "  *&x = 1;\n"  // 3
+                                "  (void)x;\n"  // 4  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 4));
+        }
     }
 };
 
