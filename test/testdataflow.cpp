@@ -3124,6 +3124,23 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 5));
         }
+
+        // FP32: variable assigned in a do-while condition must NOT be reported
+        //       as UNINIT after the loop.  The do-while condition executes at
+        //       least once unconditionally, so "do {} while ((x = sel()) <= 0)"
+        //       guarantees x is initialized before any subsequent read.
+        //       Reproduces: false positive "Uninitialized variable: result"
+        //       for "do {} while (((result = select(...)) <= 0) && ...)".
+        {
+            const char code[] = "int sel();\n"                          // 1
+                                "void f() {\n"                          // 2
+                                "  int x;\n"                            // 3  ← declared without init
+                                "  do {\n"                              // 4
+                                "  } while ((x = sel()) <= 0);\n"      // 5  ← assigns x
+                                "  (void)x;\n"                          // 6  ← must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 };
 

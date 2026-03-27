@@ -2705,6 +2705,19 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // inside it initialize the variable unconditionally.
                         clearConditionOutVars(wCond, wCondClose, ctx);
 
+                        // Phase U-WC: plain assignments in the do-while condition
+                        // (e.g. "do {} while ((x = f()) <= 0)") execute at least once
+                        // unconditionally, so x is definitely initialized after the loop.
+                        // Mirror the same loop used for while-loop conditions.
+                        for (const Token* ct = wCond->next(); ct && ct != wCondClose; ct = ct->next()) {
+                            if (ct->str() == "=" && !ct->isComparisonOp() &&
+                                ct->astOperand1() && ct->astOperand1()->varId() > 0) {
+                                const nonneg int varId = ct->astOperand1()->varId();
+                                ctx.uninits.erase(varId);
+                                ctx.state.erase(varId);
+                            }
+                        }
+
                         // Inject null constraints on do-while loop exit
                         // (same logic as the regular while handler above).
                         applyLoopExitConstraints(wCond->astOperand2(), ctx);
