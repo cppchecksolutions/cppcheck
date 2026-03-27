@@ -58,6 +58,23 @@
  *   number of tokens in the function body.  No iterative fixed-point
  *   computation is used.
  *
+ * Requirement 7 — No non-const pointer alias analysis:
+ *   When the address of a tracked variable is stored in a non-const pointer
+ *   (e.g. "T* p = &var" or "(T*)(&var)"), the analysis cannot determine
+ *   whether the variable is subsequently written through the alias.  The
+ *   variable is removed from the tracked state so that a stale UNINIT value
+ *   is not propagated to later reads.  If the address is stored only in a
+ *   const pointer ("const T* p = &var"), the pointed-to value cannot be
+ *   modified through the alias, so tracking continues normally.
+ *
+ * Requirement 8 — Partial initialization via non-const alias:
+ *   If a variable is initialized through a non-const pointer alias (even
+ *   partially, such as writing individual bytes of a scalar), the analysis
+ *   treats the variable as fully initialized.  This is implemented by
+ *   Requirement 7: aborting tracking when a non-const alias is formed
+ *   means the UNINIT value is cleared before any writes occur through
+ *   the alias.
+ *
  * =========================================================================
  * ALGORITHM
  * =========================================================================
@@ -2027,6 +2044,54 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                                 int branchDepth, int loopDepth,
                                 const Settings* settings = nullptr);
 
+// ===========================================================================
+// 9f. isNonConstAddressTaken (Requirement 7 helper)
+// ===========================================================================
+
+/// Returns true when the unary '&' expression at `addrTok` will be stored in
+/// (or cast to) a non-const pointer — i.e. the alias could be used to modify
+/// the variable being addressed.
+///
+/// Requirement 7 (no non-const pointer alias analysis): when the address is
+/// used as a non-const pointer the analysis cannot determine whether the
+/// variable is written through the alias.  Abort tracking (false negatives
+/// preferred over false positives).
+///
+/// Conservative: returns true for any unrecognised context.
+/// Returns false only when the address is provably stored in a const-pointer
+/// context or passed as a function argument (the call-site handler manages it).
+///
+///   bit 0 of ValueType::constness: 1 = pointed-to data is const ("const T*").
+///   A non-const pointer has constness & 1 == 0.
+static bool isNonConstAddressTaken(const Token* addrTok) {
+    for (const Token* parent = addrTok->astParent(); parent; parent = parent->astParent()) {
+        // Cast expression: (T*)(&var).  Check the cast result type.
+        if (parent->str() == "(" && parent->isCast()) {
+            const ValueType* vt = parent->valueType();
+            if (vt && vt->pointer > 0)
+                return (vt->constness & 1) == 0;  // non-const if bit 0 clear
+            continue;  // cast without type info — keep climbing
+        }
+        // Assignment: p = &var.  Check p's declared type.
+        if (parent->str() == "=" && parent->astOperand1()) {
+            const Token* lhsTok = parent->astOperand1();
+            if (lhsTok && lhsTok->variable()) {
+                const ValueType* vt = lhsTok->variable()->valueType();
+                if (vt && vt->pointer > 0)
+                    return (vt->constness & 1) == 0;
+            }
+            return true;  // can't determine — conservative
+        }
+        // Function call argument: let the call-site handler manage this.
+        if (parent->str() == "(")
+            return false;
+        // Other context — conservative: treat as non-const.
+        return true;
+    }
+    return true;  // chain exhausted — conservative
+}
+
+
 /// Forward analysis pass: walk [start, end) in program order.
 ///
 /// State semantics: ctx.state[varId] = the values that varId is KNOWN or
@@ -3040,11 +3105,28 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // the variable's address may escape and a called function could modify
         // it through that pointer.  Remove the varId from localScalars so it
         // is conservatively cleared at subsequent call sites.
+        //
+        // Requirement 7 (no non-const pointer alias analysis): when the
+        // address is stored in a non-const pointer, the variable may be
+        // written through the alias without the analysis detecting it.
+        // Abort tracking the variable immediately by removing it from
+        // ctx.uninits and ctx.state.
+        // If the address is only used as a const pointer the variable
+        // cannot be modified through the alias, so tracking continues.
         if (tok->str() == "&" && !tok->astOperand2()) {
             // Unary '&': the operand is the variable whose address is taken.
             const Token* operand = tok->astOperand1();
-            if (operand && operand->varId() > 0)
-                ctx.addressTaken.insert(operand->varId());
+            if (operand && operand->varId() > 0) {
+                const nonneg int varId = operand->varId();
+                ctx.addressTaken.insert(varId);
+                // Requirement 7: abort tracking when non-const address taken.
+                // A non-const alias could be used to initialize the variable
+                // (Requirement 8: partial init counts as full init).
+                if (isNonConstAddressTaken(tok)) {
+                    ctx.uninits.erase(varId);
+                    ctx.state.erase(varId);
+                }
+            }
         }
 
         // =================================================================

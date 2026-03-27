@@ -3083,6 +3083,25 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 8, stdSettings));
         }
+
+        // FP31: non-const pointer alias — address taken via non-const pointer.
+        //       Variable x is written through a non-const unsigned char* alias
+        //       (all bytes of a double overwritten via array indexing), then
+        //       read.  Without the fix, Phase L only adds x to addressTaken but
+        //       does not remove x from ctx.uninits/ctx.state, so the UNINIT
+        //       value persists and produces a false positive at the read.
+        //       Requirement 7: abort tracking when &var is stored in a
+        //       non-const pointer.  Requirement 8: partial initialization
+        //       through a non-const alias counts as full initialization.
+        {
+            const char code[] = "void f(unsigned char *b) {\n"          // 1
+                                "  double x;\n"                          // 2
+                                "  unsigned char *p = (unsigned char *)(&x);\n"  // 3
+                                "  p[0] = b[0];\n"                       // 4
+                                "  (void)x;\n"                           // 5  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 5));
+        }
     }
 };
 
