@@ -1615,6 +1615,31 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 13));
         }
+
+        // U24 (FP): variable assigned in a while-loop condition must NOT be
+        //           reported as UNINIT inside the loop body, even when a
+        //           different (unrelated) while loop appears before it.
+        //
+        //   The bug: the do-while post-processing check fired on the first
+        //   while loop because its empty body "}" was followed by the second
+        //   "while" keyword.  The code misidentified the second while's
+        //   condition as the do-while tail, causing its body to be visited
+        //   before Phase U-WC had cleared x from ctx.state/ctx.uninits.
+        //
+        //   Reproduces: false positive "Uninitialized variable: wait_pid"
+        //   on "return (wait_pid != finger_pid)" inside a while body when a
+        //   separate "while (...) {}" loop precedes it.
+        {
+            const char code[] = "int getC(void);\n"                      // 1
+                                "int getValue(int *);\n"                  // 2
+                                "void f() {\n"                            // 3
+                                "  int x;\n"                              // 4  ← declared without init
+                                "  while (getC() != 0) {}\n"             // 5  ← unrelated while loop
+                                "  while ((x = getValue(0)) != -1)\n"    // 6  ← x assigned in condition
+                                "    (void)x;\n"                         // 7  ← x is NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 7));
+        }
     }
 
     // -----------------------------------------------------------------------

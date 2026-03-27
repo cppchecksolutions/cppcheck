@@ -2376,6 +2376,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             if (loopDepth >= MAX_LOOP_DEPTH)
                 return;  // too deeply nested — abort (requirement 4)
 
+            const bool isDoWhile = (tok->str() == "do");
             const Token* bodyOpen = nullptr;
             const Token* forCondFirst = nullptr;  // Phase NW3b: first token of for-loop condition
             if (tok->str() == "do") {
@@ -2602,7 +2603,10 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // is null-guarded in the condition may be null after the loop.
             //   "do { } while (p)"       → p is definitely null (Known null).
             //   "do { } while (p && ...)" → p is possibly null (Possible null).
-            if (tok->next() && tok->next()->str() == "while") {
+            // Requirement: guard with isDoWhile so that "while (...) {} while (...)"
+            // is not misidentified as a do-while loop — the second while keyword is
+            // the start of a separate statement, not the do-while tail condition.
+            if (isDoWhile && tok->next() && tok->next()->str() == "while") {
                 const Token* wCond = tok->next()->next();
                 if (wCond && wCond->str() == "(") {
                     const Token* wCondClose = wCond->link();
@@ -2725,6 +2729,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     continue;
                 }
                 if (argTok->varId() > 0 && argTok->isName()) {
+                    
                     annotateTok(argTok, ctx.state, branchDepth);
                     annotateMemberTok(argTok, ctx);
                     annotateContainerTok(argTok, ctx);
@@ -3082,6 +3087,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // Variable read: annotate with current state values
         // =================================================================
         if (tok->varId() > 0 && tok->isName()) {
+            
             annotateTok(tok, ctx.state, branchDepth);  // int, ptr, float, UNINIT
             annotateMemberTok(tok, ctx);               // Phase M: member field values
             annotateContainerTok(tok, ctx);            // Phase C: container size values
@@ -3300,8 +3306,10 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
         // =================================================================
         // Variable read: annotate with backward constraint values
         // =================================================================
-        if (tok->varId() > 0 && tok->isName())
+        if (tok->varId() > 0 && tok->isName()) {
+            
             annotateTok(const_cast<Token*>(tok), state);
+        }
     }
 }
 
