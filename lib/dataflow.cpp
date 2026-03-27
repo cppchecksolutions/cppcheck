@@ -1934,56 +1934,53 @@ static void collectRefOutVars(const Token* tok,
     });
 }
 
-/// Collect direct non-const reference arguments of the call at `callTok` and
-/// apply the standard out-parameter treatment:
-///   - mark address-taken (so the state-clear step won't preserve stale UNINIT)
-///   - add to callOutVars (so U2 re-injection is skipped for these vars)
-///   - erase from ctx.uninits (prevents re-injection by later unrelated calls)
+/// Apply the standard out-parameter treatment for non-const reference args
+/// of the call at `callTok`:
+///   - mark address-taken so clearCallClobberableState clears the variable
+///     (the callee may have initialized it through the reference)
+///   - erase from ctx.uninits so loops/condInits do not treat it as uninit
 /// Used in both condition-level and statement-level call handlers.
-static void applyRefOutVars(const Token* callTok, DFContext& ctx,
-                             std::unordered_set<nonneg int>& callOutVars) {
+static void applyRefOutVars(const Token* callTok, DFContext& ctx) {
     std::unordered_set<nonneg int> refOutVars;
     collectRefOutVars(callTok, refOutVars);
     for (const nonneg int vid : refOutVars) {
         ctx.addressTaken.insert(vid);
-        callOutVars.insert(vid);
         ctx.uninits.erase(vid);
     }
 }
 
-/// Re-inject UNINIT(Possible) into ctx.state for every variable in
-/// ctx.uninits that is not listed in callOutVars (Requirement 2 / Phase U2).
-///
-/// Called after every function call to ensure that variables declared
-/// without an initializer remain visible as possibly-uninitialized even
-/// after the main state has been cleared by clearCallClobberableState.
-/// Variables in callOutVars were identified as out-parameters of this
-/// specific call, so they should not be flagged.
-///
-/// Used in both the condition-level and statement-level call handlers.
-static void reinjectUninitAfterCall(DFContext& ctx,
-                                     const std::unordered_set<nonneg int>& callOutVars) {
-    for (const nonneg int varId : ctx.uninits) {
-        if (callOutVars.count(varId))
-            continue;
-        ValueFlow::Value u;
-        u.valueType = ValueFlow::Value::ValueType::UNINIT;
-        u.setPossible();
-        ctx.state[varId] = {u};
-    }
-}
 
 /// Clear all state entries that a called function could clobber.
 /// Local scalars whose address was never taken are safe and preserved.
+/// UNINIT entries for non-address-taken variables are also preserved:
+/// a function call cannot make a variable uninitialized — if it was
+/// uninitialized before the call it remains uninitialized after.
+/// Address-taken variables are cleared because the callee may have
+/// initialized them through the pointer.
 /// Member state is always conservatively cleared.
 /// Used in both condition-level and statement-level call handlers.
 static void clearCallClobberableState(DFContext& ctx) {
     for (auto it = ctx.state.begin(); it != ctx.state.end(); ) {
         const nonneg int varId = it->first;
-        if (ctx.localScalars.count(varId) && !ctx.addressTaken.count(varId))
-            ++it;  // safe local scalar — preserve
-        else
-            it = ctx.state.erase(it);
+        // Preserve local scalars whose address was never taken.
+        if (ctx.localScalars.count(varId) && !ctx.addressTaken.count(varId)) {
+            ++it;
+            continue;
+        }
+        // Preserve UNINIT-only entries for non-address-taken variables.
+        // A call cannot uninitialize a variable — only initialize one.
+        if (!ctx.addressTaken.count(varId)) {
+            const DFValues& vals = it->second;
+            if (!vals.empty() &&
+                std::all_of(vals.begin(), vals.end(),
+                             [](const ValueFlow::Value& v) {
+                    return v.valueType == ValueFlow::Value::ValueType::UNINIT;
+                })) {
+                ++it;
+                continue;
+            }
+        }
+        it = ctx.state.erase(it);
     }
     ctx.members.clear();
 }
@@ -2219,9 +2216,9 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     continue;
 
                 // Requirement: if '&var' is passed to this call, the callee
-                // may initialize var through that pointer.  Do not re-inject
-                // UNINIT for such varIds after the call.
-                std::unordered_set<nonneg int> callOutVars;
+                // may initialize var through that pointer.  Mark it as
+                // address-taken and remove from uninits so clearCallClobberableState
+                // clears it (rather than preserving its UNINIT value).
                 if (ct->link()) {
                     for (const Token* argTok = ct->next();
                          argTok && argTok != ct->link();
@@ -2229,12 +2226,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         if (argTok->isUnaryOp("&")) {
                             const Token* operand = argTok->astOperand1();
                             if (operand->varId() > 0) {
-                                callOutVars.insert(operand->varId());
-                                // Requirement: erase from uninits so that
-                                // subsequent unrelated calls do not re-inject
-                                // UNINIT for this variable — the callee may
-                                // have initialized it through the pointer.
-                                // Mirrors the statement-level handler.
+                                ctx.addressTaken.insert(operand->varId());
                                 ctx.uninits.erase(operand->varId());
                             }
                         }
@@ -2242,10 +2234,8 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 }
                 // Requirement: also handle direct non-const reference arguments
                 // in condition-level function calls (same logic as site #1).
-                applyRefOutVars(ct, ctx, callOutVars);
+                applyRefOutVars(ct, ctx);
                 clearCallClobberableState(ctx);
-                // Re-inject UNINIT(Possible) for uninit variables (Phase U2).
-                reinjectUninitAfterCall(ctx, callOutVars);
                 // Skip to the matching ')' to avoid processing inner/nested
                 // function calls separately — the outer call's clearing
                 // already covers all variables they could modify.
@@ -2661,7 +2651,6 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
         // only the specifically-tracked container size is preserved.
         if (isFunctionCallOpen(tok)) {
             bool isKnownContainerMethod = false;
-            std::unordered_set<nonneg int> callOutVars;
 
             // Phase C: detect container method calls and update size.
             // AST for "v.push_back(x)":
@@ -2747,21 +2736,17 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Walk ALL tokens (no paren skipping) so that address-of
             // expressions inside casts — both C++ named casts
             // (reinterpret_cast<void**>(&p)) and C-style casts
-            // ((void**)(&p)) — are detected.  When found, the variable is
-            // removed from ctx.uninits so that subsequent calls do not
-            // re-inject UNINIT for it (Phase U2).
+            // ((void**)(&p)) — are detected.  Mark the variable as
+            // address-taken and remove from uninits: the callee may have
+            // initialized it through the pointer, so clearCallClobberableState
+            // must clear it (rather than preserving the UNINIT value).
             for (const Token* argTok = tok->next();
                  argTok && argTok != tok->link();
                  argTok = argTok->next()) {
                 if (argTok->isUnaryOp("&")) {
                     const Token* operand = argTok->astOperand1();
                     if (operand->varId() > 0) {
-                        // Also mark as address-taken before the clear step so
-                        // local-scalar preservation does not keep stale UNINIT.
                         ctx.addressTaken.insert(operand->varId());
-                        callOutVars.insert(operand->varId());
-                        // Remove from uninits so that subsequent unrelated
-                        // function calls do not re-inject UNINIT for this var.
                         ctx.uninits.erase(operand->varId());
                     }
                 }
@@ -2770,28 +2755,16 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Requirement: also handle variables passed as direct non-const
             // reference arguments (e.g. init(x) where init takes int&).
             // The callee may initialize such variables, so treat them the same
-            // as address-taken out-pointer arguments: clear stale UNINIT state
-            // and skip re-injection after the call.
-            applyRefOutVars(tok, ctx, callOutVars);
+            // as address-taken out-pointer arguments.
+            applyRefOutVars(tok, ctx);
 
             // Phase L: selectively clear state, preserving local scalars
-            // whose address has not been taken.
-            //
-            // Requirement: a local, non-pointer, non-reference, non-volatile
-            // scalar variable whose address was never observed via unary '&'
-            // cannot be modified by any called function (intra-procedural
-            // analysis, no aliasing).  Its value is therefore still valid
-            // after the call and must be retained to avoid false negatives.
-            //
-            // All other tracked variables (globals, pointers, references,
-            // address-taken locals, member state) are conservatively cleared.
+            // whose address has not been taken, and UNINIT values for variables
+            // not address-taken (a call cannot uninitialize a variable).
             clearCallClobberableState(ctx);
             // Only clear container state for non-container-method calls.
             if (!isKnownContainerMethod)
                 ctx.containers.clear();
-
-            // Phase U2: re-inject UNINIT(Possible) for uninit variables.
-            reinjectUninitAfterCall(ctx, callOutVars);
 
             if (tok->link())
                 tok = tok->link();

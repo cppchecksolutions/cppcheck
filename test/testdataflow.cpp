@@ -1865,6 +1865,29 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // U24: a function call must not change the UNINIT status of a pointer
+        //     variable — the behavior must be the same with or without the call.
+        //     clearCallClobberableState preserves UNINIT-only entries so the
+        //     variable remains uninitialized after the call, just as it was before.
+        //     Fixes: FP "Uninitialized variable" reported after a function call
+        //     (e.g. exit()) in dead code, where re-injection was the root cause.
+        {
+            // Without call: x is UNINIT at line 3.
+            const char code_no_call[] = "void f() {\n"    // 1
+                                        "  int *x;\n"     // 2
+                                        "  (void)x;\n"    // 3  ← UNINIT
+                                        "}\n";
+            // With call: x should be UNINIT at line 4 — same as without call.
+            const char code_with_call[] = "void a();\n"    // 1
+                                          "void f() {\n"   // 2
+                                          "  int *x;\n"    // 3
+                                          "  a();\n"       // 4 ← call: must not change uninit status
+                                          "  (void)x;\n"   // 5  ← same UNINIT as without call
+                                          "}\n";
+            ASSERT(testValueOfXUninit(code_no_call, 3));
+            ASSERT(testValueOfXUninit(code_with_call, 5));
+        }
     }
 
     // -----------------------------------------------------------------------
