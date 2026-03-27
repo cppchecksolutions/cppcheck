@@ -1640,6 +1640,28 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 7));
         }
+
+        // U25 (FP): variable assigned in the for-loop increment clause must NOT
+        //           be reported as UNINIT after the loop.
+        //
+        //   Pattern:  for (cur = p; cur; x = cur, cur = cur->next) {}
+        //             (void)x;    ← must NOT be uninit
+        //
+        //   The bug: the increment clause "x = cur, cur = cur->next" was never
+        //   scanned by dropWrittenVars or the NW4 uninit-erase loop.  So x
+        //   kept its UNINIT state from the declaration and was falsely flagged.
+        {
+            struct Node { struct Node* next; };
+            (void)sizeof(struct Node);  // suppress unused-variable warning
+            const char code[] = "struct Node { struct Node *next; };\n" // 1
+                                "void f(struct Node *p) {\n"            // 2
+                                "  struct Node *x;\n"                   // 3  ← declared without init
+                                "  struct Node *cur;\n"                 // 4
+                                "  for (cur = p; cur; x = cur, cur = cur->next) {}\n" // 5
+                                "  (void)x;\n"                         // 6  ← x is NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -836,12 +836,13 @@ static bool isZeroValue(const Token* t) {
     return t && t->hasKnownIntValue() && t->getKnownIntValue() == 0;
 }
 
+// Forward declaration needed because isNullTestCondition and
+// isNonNullTestCondition are mutually recursive.
+static bool isNonNullTestCondition(const Token* cond, nonneg int varId);
+
 /// Returns true when `cond` is a null-test of `varId` — i.e. the condition
 /// is true exactly when the variable is null.  Covers:
 ///   !p,  p == 0,  0 == p,  p == nullptr,  nullptr == p,  !(non-null-test)
-static bool isNullTestCondition(const Token* cond, nonneg int varId);
-static bool isNonNullTestCondition(const Token* cond, nonneg int varId);
-
 static bool isNullTestCondition(const Token* cond, nonneg int varId) {
     if (!cond)
         return false;
@@ -2557,6 +2558,27 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // at least once, so the callee may initialize those variables.
                         // Mirrors the same treatment for while/do-while conditions.
                         clearConditionOutVars(initEnd, condEnd, ctx);
+
+                        // Phase U2-FI: for-loop increment clause.
+                        // The increment clause (condEnd+1 .. condClose) executes
+                        // after each body iteration and at least once when the loop
+                        // runs.  Variables assigned here must be treated the same as
+                        // body assignments: drop their stale state (including UNINIT)
+                        // and remove from ctx.uninits so Phase U2 does not re-inject.
+                        //
+                        // Requirement: prevents false positives such as:
+                        //   struct Node *x;
+                        //   for (cur = p; cur; x = cur, cur = cur->next) {}
+                        //   (void)x;   ← must NOT be flagged uninitvar
+                        if (condEnd && condEnd->str() == ";") {
+                            dropWrittenVars(condEnd->next(), condClose, ctx);
+                            for (auto it = ctx.uninits.begin(); it != ctx.uninits.end(); ) {
+                                if (hasTopLevelAssignment(*it, condEnd->next(), condClose))
+                                    it = ctx.uninits.erase(it);
+                                else
+                                    ++it;
+                            }
+                        }
                     }
                 }
             }
