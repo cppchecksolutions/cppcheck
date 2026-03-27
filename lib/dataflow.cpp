@@ -75,6 +75,14 @@
  *   means the UNINIT value is cleared before any writes occur through
  *   the alias.
  *
+ * Requirement 9 — Inline assembler aborts analysis:
+ *   When an asm() statement is encountered, the forward analysis is aborted
+ *   immediately for the remainder of the function body.  Inline assembler can
+ *   read and write any variable through output constraints, memory clobbers,
+ *   or indirect effects that the analysis cannot model.  Aborting prevents
+ *   false positives (Requirement 4) — the cost is false negatives after the
+ *   asm statement, which is acceptable per project policy.
+ *
  * =========================================================================
  * ALGORITHM
  * =========================================================================
@@ -2731,6 +2739,17 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             }
             continue;
         }
+
+        // =================================================================
+        // asm() — abort analysis (Requirement 9)
+        // =================================================================
+        // Inline assembler can read and write any variable through output
+        // constraints, memory clobbers, or indirect effects.  The analysis
+        // cannot model these effects, so it aborts immediately to avoid
+        // false positives (Requirement 4: no FP over false negatives).
+        if (isFunctionCallOpen(tok) &&
+            tok->previous() && tok->previous()->str() == "asm")
+            return;
 
         // =================================================================
         // Function calls — clear all state (conservative)

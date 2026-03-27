@@ -3141,6 +3141,19 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // FP33: variable initialized via inline asm output constraint must NOT
+        //       be reported as UNINIT.  When asm() is encountered the dataflow
+        //       analysis is aborted because it cannot reason about assembler
+        //       effects (Requirement 9 / Requirement 4: no false positives).
+        {
+            const char code[] = "void f() {\n"                           // 1
+                                "  unsigned int x;\n"                    // 2  ← declared without init
+                                "  asm(\"\" : \"=a\"(x));\n"            // 3  ← initializes x via asm
+                                "  (void)x;\n"                           // 4  ← must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 4));
+        }
     }
 };
 
