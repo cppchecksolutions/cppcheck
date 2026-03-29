@@ -518,6 +518,20 @@ static bool isFunctionCallOpen(const Token* tok) {
 
 
 // ===========================================================================
+// 3b. isZeroValue — moved here so evalConstInt can use it
+// ===========================================================================
+
+/// Returns true when tok carries a Known integer value of zero.
+/// Used by evalConstInt (to recognise null pointer constants that have been
+/// annotated with Known(0) in the literal pass) and by isNullTestCondition /
+/// isNonNullTestCondition to recognise null literal operands in comparisons
+/// such as "p == 0" or "p != 0".
+static bool isZeroValue(const Token* t) {
+    return t && t->hasKnownIntValue() && t->getKnownIntValue() == 0;
+}
+
+
+// ===========================================================================
 // 4. evalConstInt
 // ===========================================================================
 
@@ -528,7 +542,7 @@ static bool isFunctionCallOpen(const Token* tok) {
 /// Handles:
 ///  - Integer literals            (42, 0xFF, …)
 ///  - Character literals          ('a', …)
-///  - nullptr keyword             → 0 (Phase N)
+///  - Null pointer constants      → 0 (via isZeroValue; Phase N)
 ///  - Variables with a Known value in state (copy propagation)
 ///  - Unary minus                 (-x)
 ///  - Binary arithmetic           (+, -, *, /, %)
@@ -559,10 +573,14 @@ static bool evalConstInt(const Token* expr, const DFState& state, ValueFlow::Val
         return false;
     }
 
-    // --- nullptr keyword → null pointer constant 0 ---
-    // Phase N: "nullptr" must evaluate to 0 so that pointer conditions such as
-    // "p == nullptr" can be recognised by applyConditionConstraint.
-    if (expr->str() == "nullptr") {
+    // --- null pointer constant ---
+    // Phase N: any non-variable token that already carries a Known(0) integer
+    // value is treated as a null pointer constant.  This covers:
+    //   - C++11 "nullptr" (annotated in the setValues literal pass)
+    //   - C macro "NULL" after preprocessing (expanded to the literal "0")
+    //   - Any other zero-valued constant resolved by an earlier pass
+    // Using isZeroValue() avoids hardcoding specific token names here.
+    if (expr->varId() == 0 && isZeroValue(expr)) {
         result = ValueFlow::Value(0LL);
         result.setKnown();
         return true;
@@ -839,13 +857,6 @@ static bool isRhsOfGuardedAndBySameVar(const Token* tok) {
 /// a null-test for the same variable (e.g. "!s || foo || s->x" — s->x is safe).
 static bool isRhsOfGuardedOrByNullTest(const Token* tok) {
     return isRhsOfChainedOp(tok, "||", orLhsContainsNullTest);
-}
-
-/// Returns true when tok carries a Known integer value of zero.
-/// Used by isNullTestCondition / isNonNullTestCondition to recognize
-/// null literal operands in comparisons such as "p == 0" or "p != 0".
-static bool isZeroValue(const Token* t) {
-    return t && t->hasKnownIntValue() && t->getKnownIntValue() == 0;
 }
 
 // Forward declaration needed because isNullTestCondition and
@@ -3544,6 +3555,16 @@ void setValues(TokenList& tokenlist,
             ValueFlow::Value v;
             v.valueType = ValueFlow::Value::ValueType::FLOAT;
             v.floatValue = MathLib::toDoubleNumber(tok->str());
+            v.setKnown();
+            tok->addValue(v);
+        } else if (tok->str() == "NULL" ||
+                   ((tok->isCpp() || settings.standards.c >= Standards::C23) &&
+                    tok->str() == "nullptr")) {
+            // Null pointer constants: annotate as Known(0) so that
+            // isZeroValue() recognises them in evalConstInt and
+            // applyConditionConstraint (Phase N).
+            // Mirrors the same annotation in vf_common.cpp (valueFlowNumber).
+            ValueFlow::Value v(0LL);
             v.setKnown();
             tok->addValue(v);
         }

@@ -3219,6 +3219,28 @@ private:
                 return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
             }));
         }
+
+        // FP35: while (x && x->next) loop followed by "if (x == NULL)" — the
+        //       NULL macro must be recognized as a null pointer constant so that
+        //       the else branch knows x is non-null (Impossible 0).
+        //       Regression: test1.c false positive nullPointer at the else-branch
+        //       dereference "x->next = 0".
+        //       Root cause: evalConstInt did not handle the token "NULL", so
+        //       applyConditionConstraint ignored the "x == NULL" condition and
+        //       left x as Possible(0) in both branches.
+        {
+            const char code[] =
+                "struct Node { struct Node *next; };\n"  // 1
+                "void f(struct Node *x) {\n"             // 2
+                "  while (x && x->next)\n"               // 3
+                "    x = x->next;\n"                     // 4
+                "  if (x == NULL)\n"                     // 5
+                "    (void)0;\n"                         // 6
+                "  else\n"                               // 7
+                "    x->next = 0;\n"                     // 8  x must be Impossible(0)
+                "}\n";
+            ASSERT(testValueOfXImpossible(code, 8, 0));
+        }
     }
 };
 
