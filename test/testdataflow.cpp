@@ -3241,6 +3241,33 @@ private:
                 "}\n";
             ASSERT(testValueOfXImpossible(code, 8, 0));
         }
+
+        // FP36: (obj->field == NULL) || (obj->field->member == ...) pattern.
+        //       The LHS null-test short-circuits: the RHS is only evaluated when
+        //       obj->field is NOT null.  obj->field in the RHS must NOT be annotated
+        //       with Possible(0) (CheckNullPointer false positive).
+        //       Regression for test1.c (TkDisplay grabWinPtr pattern):
+        //         if (dispPtr->grabWinPtr != NULL) {}
+        //         if ((dispPtr->grabWinPtr == NULL) || (dispPtr->grabWinPtr->mainPtr == ...))
+        //       Root cause: annotateMemberTok did not check whether the member
+        //       access is on the RHS of a guarded '||' null-test for the same member.
+        {
+            const char code[] =
+                "struct T { int y; };\n"                                    // 1
+                "struct S { struct T * x; };\n"                             // 2
+                "void foo(struct S *s) {\n"                                 // 3
+                "  if (s->x != 0) {}\n"                                    // 4  x becomes Possible(0) after merge
+                "  if ((s->x == 0) || (s->x->y == 0)) {}\n"               // 5  x in RHS must NOT be Possible(0)
+                "}\n";
+            // After tokenizer "->" → ".": s->x->y becomes s . x . y
+            // x in "x . y" context is guarded by (s->x == 0) on the LHS of ||
+            // and must not carry a non-Impossible null value.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "x . y");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(),
+                                [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
     }
 };
 

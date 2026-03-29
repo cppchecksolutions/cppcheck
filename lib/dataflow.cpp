@@ -1036,12 +1036,91 @@ static void annotateTok(Token* tok, const DFState& state, int branchDepth = 0) {
     }
 }
 
+/// Phase MN: returns true when `cond` is a null-test of the member field
+/// identified by (objVarId, fieldVarId) — i.e. the condition is true exactly
+/// when that member is null.
+/// Covers: !obj.field, obj.field==0, 0==obj.field, obj.field==nullptr,
+///         nullptr==obj.field  (same forms as isNullTestCondition but for
+///         member pointer accesses tracked via DFMemberState).
+static bool isNullTestConditionMember(const Token* cond,
+                                       nonneg int objVarId,
+                                       nonneg int fieldVarId) {
+    if (!cond)
+        return false;
+    // !obj.field
+    if (cond->str() == "!" && cond->astOperand1() && !cond->astOperand2() &&
+        isMemberPtrAccess(cond->astOperand1())) {
+        const Token* m = cond->astOperand1();
+        if (m->astOperand1() && m->astOperand1()->varId() == objVarId &&
+            m->astOperand2() && m->astOperand2()->varId() == fieldVarId)
+            return true;
+    }
+    // obj.field == 0  or  0 == obj.field
+    if (cond->str() == "==") {
+        const Token* lhs = cond->astOperand1();
+        const Token* rhs = cond->astOperand2();
+        if (lhs && isMemberPtrAccess(lhs) &&
+            lhs->astOperand1() && lhs->astOperand1()->varId() == objVarId &&
+            lhs->astOperand2() && lhs->astOperand2()->varId() == fieldVarId &&
+            isZeroValue(rhs))
+            return true;
+        if (rhs && isMemberPtrAccess(rhs) &&
+            rhs->astOperand1() && rhs->astOperand1()->varId() == objVarId &&
+            rhs->astOperand2() && rhs->astOperand2()->varId() == fieldVarId &&
+            isZeroValue(lhs))
+            return true;
+    }
+    return false;
+}
+
+/// Returns true when the LHS subtree of a '||' chain contains a null-test for
+/// the member (objVarId, fieldVarId).  Mirrors orLhsContainsNullTest but for
+/// member pointer accesses (Phase MN).
+static bool orLhsContainsNullTestMember(const Token* lhs,
+                                          nonneg int objVarId,
+                                          nonneg int fieldVarId) {
+    if (!lhs)
+        return false;
+    if (isNullTestConditionMember(lhs, objVarId, fieldVarId))
+        return true;
+    if (lhs->str() == "||")
+        return orLhsContainsNullTestMember(lhs->astOperand1(), objVarId, fieldVarId) ||
+               orLhsContainsNullTestMember(lhs->astOperand2(), objVarId, fieldVarId);
+    return false;
+}
+
+/// Returns true when tok (a member field token of the access (objVarId, fieldVarId))
+/// is on the RHS of a '||' chain whose LHS contains a null-test for the same member.
+///
+/// Requirement 4 (no false positives): "(obj->field == NULL) || (obj->field->next == ...)"
+/// — obj->field in the RHS is only evaluated when it is NOT null, so annotating it with
+/// Possible(0) would be a false positive.  This guard suppresses such annotations.
+static bool isRhsOfGuardedOrByNullTestForMember(const Token* tok,
+                                                  nonneg int objVarId,
+                                                  nonneg int fieldVarId) {
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent; child = parent, parent = parent->astParent()) {
+        if (parent->str() != "||")
+            continue;
+        if (parent->astOperand2() != child)
+            continue;
+        if (orLhsContainsNullTestMember(parent->astOperand1(), objVarId, fieldVarId))
+            return true;
+    }
+    return false;
+}
+
 /// Phase M: annotate the field token of a member-access read "obj.field"
 /// with the known/possible values from the member state.
 ///
 /// Checks that tok is the right-hand operand of a '.' token (i.e. it IS the
 /// field being accessed), then looks up (obj.varId(), field.varId()) in
 /// ctx.members and copies the values onto tok.
+///
+/// Null-guard suppression (Requirement 4): when the member field access is on
+/// the RHS of a '||' whose LHS already contains a null-test for the same
+/// member (e.g. "(s->x == NULL) || (s->x->y == 0)"), non-Impossible null
+/// values are suppressed to avoid false-positive nullPointer warnings.
 static void annotateMemberTok(Token* tok, const DFContext& ctx) {
     if (!tok || tok->varId() == 0 || !tok->isName())
         return;
@@ -1059,20 +1138,32 @@ static void annotateMemberTok(Token* tok, const DFContext& ctx) {
     if (!objTok || objTok->varId() == 0)
         return;
 
-    const auto it = ctx.members.find({objTok->varId(), tok->varId()});
+    const nonneg int objId   = objTok->varId();
+    const nonneg int fieldId = tok->varId();
+
+    const auto it = ctx.members.find({objId, fieldId});
     if (it == ctx.members.end())
         return;
 
-    for (const ValueFlow::Value& val : it->second)
+    // Requirement 4: suppress non-Impossible null annotations when the member
+    // access is on the RHS of a '||' whose LHS null-tests the same member.
+    const bool guardedOrMember = isRhsOfGuardedOrByNullTestForMember(tok, objId, fieldId);
+    for (const ValueFlow::Value& val : it->second) {
+        if (guardedOrMember && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+            continue;
         tok->addValue(val);
+    }
 
     // Requirement: the '.' member-access expression token must carry the same
     // value as the field token so that checkers inspecting astOperand2() of an
     // operator (e.g. checkZeroDivision looks at tok->astOperand2()->getValue(0))
     // find the value without needing special handling for member-access nodes.
     Token* dotTok = const_cast<Token*>(parent);
-    for (const ValueFlow::Value& val : it->second)
+    for (const ValueFlow::Value& val : it->second) {
+        if (guardedOrMember && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
+            continue;
         dotTok->addValue(val);
+    }
 }
 
 /// Phase C: annotate a container variable token with the current known
