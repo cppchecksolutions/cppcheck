@@ -1662,6 +1662,40 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // U26 (FP): variable assigned inside a while(1) loop in a conditional
+        //           branch, with the only non-returning exit being a break
+        //           that follows the assignment.
+        //
+        //   Pattern:  while (1) {
+        //               if (cond) {
+        //                 x = func();     ← x assigned here
+        //                 if (x) break;   ← break only after assignment
+        //               }
+        //               if (other) return;
+        //             }
+        //             (void)x;   ← x is NOT uninit: break only reachable after x=func()
+        //
+        //   The bug: Phase NW3 re-injects UNINIT(Possible) for any variable in
+        //   ctx.uninits whose only loop-body assignment is conditional (not
+        //   top-level).  For while(1) the condition never becomes false, so the
+        //   loop only exits via break/return/throw.  On the break path x was
+        //   always just assigned, so NW3 should not apply.
+        {
+            const char code[] = "int f(void);\n"                 // 1
+                                "void g() {\n"                   // 2
+                                "  int x;\n"                     // 3  ← declared without init
+                                "  while (1) {\n"                // 4
+                                "    if (f()) {\n"               // 5
+                                "      x = f();\n"               // 6  ← x assigned here
+                                "      if (x) break;\n"          // 7  ← break only after assignment
+                                "    }\n"                        // 8
+                                "    if (f()) return;\n"         // 9  ← early exit
+                                "  }\n"                          // 10
+                                "  (void)x;\n"                   // 11  ← x is NOT uninit
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 11));
+        }
     }
 
     // -----------------------------------------------------------------------

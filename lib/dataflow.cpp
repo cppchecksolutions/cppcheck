@@ -108,6 +108,10 @@
  *   assignment in the loop body, it is treated as initialized after the loop
  *   because loops are assumed to execute at least once (Requirement 4
  *   trade-off: false negatives preferred over false positives).
+ *   Constant-true loops (while(1)): Phase NW/NW3 null-exit constraints and
+ *   UNINIT re-injection are skipped because the condition never becomes false
+ *   — the loop only exits via break/return/throw, so "condition was false"
+ *   constraints would be spurious (Requirement 4 — no false positives).
  *
  *   Complexity limits (Requirement 4): the analysis aborts when branch nesting
  *   exceeds MAX_BRANCH_DEPTH, loop nesting exceeds MAX_LOOP_DEPTH, or the
@@ -2640,6 +2644,19 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                 if (condOpen && condOpen->str() == "(") {
                     const Token* condRoot = condOpen->astOperand2();
                     if (condRoot) {
+                        // Phase NW / NW3: skip for constant-true conditions (e.g., while(1)).
+                        // A constant-true loop only exits via break/return/throw, never
+                        // because the condition became false.  Null-exit constraints and
+                        // UNINIT re-injection based on "condition was false" are therefore
+                        // incorrect for such loops (Requirement 4 — no false positives).
+                        // False negatives on uninit detection after while(1) are acceptable
+                        // per project policy.
+                        ValueFlow::Value condConstVal;
+                        const bool isConstTrueLoop =
+                            evalConstInt(condRoot, ctx.state, condConstVal) &&
+                            condConstVal.intvalue != 0;
+
+                        if (!isConstTrueLoop) {
                         // Phase NW: inject null constraints on loop exit.
                         applyLoopExitConstraints(condRoot, ctx);
 
@@ -2679,6 +2696,7 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                             u.condition = condRoot;
                             ctx.state[varId] = {u};
                         }
+                        } // !isConstTrueLoop
                     }
                 }
             }
