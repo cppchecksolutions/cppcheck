@@ -3188,6 +3188,37 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 4));
         }
+
+        // FP34: pointer used in a for-loop increment clause must NOT be reported
+        //       as possibly null.  The for-loop condition guarantees the pointer is
+        //       non-null when the increment executes.  The backward analysis must
+        //       not propagate a post-loop null constraint backward through the
+        //       for-loop's increment clause.
+        //       Regression for test1.c (Linux kernel sym_check_print_recursive):
+        //         struct dep_stack *stack;
+        //         for (stack = check_top; stack != NULL; stack = stack->prev) ...
+        //         if (!stack) { ... }
+        //       Root cause: the backward pass walks the for-header tokens after
+        //       crossing the body '}', so "stack = Possible(null)" (from the
+        //       post-loop null check) reaches the RHS of "stack = stack->prev"
+        //       and annotates it with a nullable null value.
+        {
+            const char code[] =
+                "struct dep_stack { struct dep_stack *prev; void *sym; };\n"    // 1
+                "void f(struct dep_stack *check_top) {\n"                        // 2
+                "  struct dep_stack *stack;\n"                                   // 3
+                "  for (stack = check_top; stack != NULL; stack = stack->prev)\n" // 4
+                "    if (1) break;\n"                                            // 5
+                "  if (!stack) return;\n"                                        // 6
+                "}\n";
+            // stack in "stack->prev" (increment clause, line 4) must NOT be possibly null.
+            // Note: cppcheck's tokenizer replaces "->" with "." in the token list.
+            const std::list<ValueFlow::Value> values = tokenValues(code, "stack . prev");
+            ASSERT(!std::any_of(values.cbegin(), values.cend(),
+                                [](const ValueFlow::Value& v) {
+                return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
+            }));
+        }
     }
 };
 

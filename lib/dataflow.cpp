@@ -3400,6 +3400,27 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
                         tok = keyword;
                         continue;
                     }
+
+                    // Phase BW-FL: for/while loop header — skip backward to the keyword.
+                    //
+                    // For a for-loop "for (init; cond; incr) { body }": the increment
+                    // clause executes only when the loop condition is true, but the
+                    // backward state at this point reflects the post-loop context (where
+                    // the condition may be false, e.g. a pointer may be null).
+                    // Propagating such post-loop null constraints backward through the
+                    // increment clause produces false positives — "stack = stack->next"
+                    // gets annotated as possibly-null when the post-loop "if (!stack)"
+                    // check injects Possible(null) into the backward state
+                    // (Requirement 4: no false positives).
+                    //
+                    // Jumping past the entire for-header is safe because false negatives
+                    // are preferred over false positives (project policy).  For while-
+                    // loops the same reasoning applies: the condition tokens execute with
+                    // loop-body constraints that differ from the post-loop state.
+                    if (keyword && (keyword->str() == "for" || keyword->str() == "while")) {
+                        tok = keyword;
+                        continue;
+                    }
                 }
                 // else-block, do-block, unnamed block: just jump to before '{'
             }
