@@ -216,6 +216,10 @@
  *                 isZeroValue, isNullTestCondition, isNonNullTestCondition,
  *                 isInTrueBranchOfTernaryBySameVar,
  *                 isInFalseBranchOfNegatedTernaryBySameVar
+ *   5b. Partial null-guard detection (Phase UA-PG, ticket #3054)
+ *        subtreeContainsVar, lhsContainsVarInOr, isInPartiallyGuardedContext:
+ *        Detect "(p || q) && *p" where the OR guard does not exclusively
+ *        protect p.  Inject Possible(0) so CheckNullPointer can warn.
  *   6. mergeStates / mergeMemberStates / mergeContexts
  *        Combine two branch states at join points (Requirement 3)
  *   7. blockTerminates — detect unconditional exit from a block
@@ -962,6 +966,71 @@ static bool isInFalseBranchOfNegatedTernaryBySameVar(const Token* tok) {
     }
     return false;
 }
+
+// ===========================================================================
+// 5b. Partial null-guard detection (Phase UA-PG)
+// ===========================================================================
+
+/// Returns true when a variable with varId appears anywhere in the AST subtree
+/// rooted at tok.  Used by isInPartiallyGuardedContext to detect whether a
+/// pointer varId is mentioned inside an || expression on the LHS of &&.
+static bool subtreeContainsVar(const Token* tok, nonneg int varId) {
+    if (!tok)
+        return false;
+    if (tok->varId() == varId)
+        return true;
+    return subtreeContainsVar(tok->astOperand1(), varId) ||
+           subtreeContainsVar(tok->astOperand2(), varId);
+}
+
+/// Returns true when the LHS subtree of a '&&' contains varId inside an '||'
+/// expression.  This means the '&&' LHS is a disjunctive (OR) guard that
+/// mentions varId but does not exclusively guarantee that varId is non-null.
+///
+/// Example: LHS = "(p || q)" — p appears in an || so (p || q) is a partial
+/// guard: it guarantees at least one of p/q is non-null, but not p alone.
+static bool lhsContainsVarInOr(const Token* lhs, nonneg int varId) {
+    if (!lhs)
+        return false;
+    // Direct || node: varId appears somewhere in this disjunction.
+    if (lhs->str() == "||")
+        return subtreeContainsVar(lhs->astOperand1(), varId) ||
+               subtreeContainsVar(lhs->astOperand2(), varId);
+    // Chained &&: recurse into both operands.
+    if (lhs->str() == "&&")
+        return lhsContainsVarInOr(lhs->astOperand1(), varId) ||
+               lhsContainsVarInOr(lhs->astOperand2(), varId);
+    return false;
+}
+
+/// Returns true when tok (a pointer variable) is on the RHS of a '&&' chain
+/// whose LHS contains tok's varId inside an '||' expression.
+///
+/// Phase UA-PG: This pattern — "(p || q) && *p" — is an insufficient null
+/// guard for p: the LHS guarantees that at least one of p/q is non-null, but
+/// not that p itself is non-null.  If p is null and q is non-null, *p still
+/// dereferences a null pointer.
+///
+/// Example (ticket #3054):
+///   if ((p || q) && (*p || *q)) {}
+///   — p inside *p is NOT guarded; (p || q) && ... only guards the pair.
+static bool isInPartiallyGuardedContext(const Token* tok) {
+    if (!tok || tok->varId() == 0)
+        return false;
+    const nonneg int varId = tok->varId();
+    const Token* child = tok;
+    for (const Token* parent = tok->astParent(); parent;
+         child = parent, parent = parent->astParent()) {
+        if (parent->str() != "&&")
+            continue;
+        if (parent->astOperand2() != child)
+            continue;
+        if (lhsContainsVarInOr(parent->astOperand1(), varId))
+            return true;
+    }
+    return false;
+}
+
 
 /// Write the values from `state` onto tok->values() (Requirement 2).
 ///
@@ -2493,6 +2562,41 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     annotateTok(ct, ctx.state, branchDepth);
                     annotateMemberTok(ct, ctx);
                     annotateContainerTok(ct, ctx);
+
+                    // Phase UA-PG (ticket #3054): detect partially guarded pointer.
+                    // Pattern: (p || q) && *p — the disjunctive LHS guard does not
+                    // exclusively protect p against null.  Inject Possible(0) so that
+                    // CheckNullPointer can detect the potential null dereference.
+                    //
+                    // Conditions for injection:
+                    //   1. ct is a tracked pointer variable (not yet known to be null)
+                    //   2. NOT purely guarded by && (p && *p pattern handled elsewhere)
+                    //   3. NOT guarded by a || null-test (e.g. !p || *p is safe)
+                    //   4. IS in a partially guarded context (p inside (p||q) && *p)
+                    //   5. NOT already known to be non-null (Impossible(0) in state)
+                    if (isTrackedPtrVar(ct) && !isLhsOfAssignment(ct) &&
+                        !isRhsOfGuardedAndBySameVar(ct) &&
+                        !isRhsOfGuardedOrByNullTest(ct) &&
+                        isInPartiallyGuardedContext(ct)) {
+                        // Check that ct is not already known to be non-null.
+                        const auto stateIt = ctx.state.find(ct->varId());
+                        const bool knownNonNull =
+                            stateIt != ctx.state.end() &&
+                            std::any_of(stateIt->second.begin(), stateIt->second.end(),
+                                        [](const ValueFlow::Value& v) {
+                                return v.isImpossible() && v.isIntValue() && v.intvalue == 0;
+                            });
+                        if (!knownNonNull) {
+                            ValueFlow::Value nullVal(0LL);
+                            nullVal.setPossible();
+                            // Set condition to the && token (condRoot = parenOpen->astOperand2())
+                            // so that CheckNullPointer can report which condition is insufficient.
+                            const Token* pgCondRoot = parenOpen->astOperand2();
+                            if (pgCondRoot)
+                                nullVal.assumeCondition(pgCondRoot);
+                            ct->addValue(nullVal);
+                        }
+                    }
                 }
             }
 

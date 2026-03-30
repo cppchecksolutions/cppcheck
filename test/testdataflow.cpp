@@ -1257,6 +1257,21 @@ private:
                                 "}\n";
             ASSERT(getErrorPathForX(code, 2).find("3,") != std::string::npos);
         }
+
+        // N13 (ticket #3054): partially guarded pointer — (x || q) && (*x || *q).
+        // The guard (x || q) only guarantees at least one pointer is non-null;
+        // it does NOT exclusively protect x.  If x is null and q is non-null,
+        // (x || q) is true, so *x is evaluated and causes a null dereference.
+        // x inside *x must carry Possible(0) with Value::condition pointing at
+        // the && on line 2 (the insufficient guard).
+        {
+            const char code[] = "void f(const int* x, const int* q) {\n"  // 1
+                                "  if ((x || q) &&\n"                      // 2  ← && here
+                                "      (*x || *q)) {}\n"                   // 3  ← *x here
+                                "}\n";                                     // 4
+            ASSERT(testValueOfXPossible(code, 3, 0));
+            ASSERT(getErrorPathForX(code, 3).find("2,") != std::string::npos);
+        }
     }
 
     // -----------------------------------------------------------------------
