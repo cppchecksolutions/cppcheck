@@ -1458,6 +1458,12 @@ static void applyConditionConstraint(const Token* condRoot,
                 nullVal.setKnown();
             else
                 nullVal.setImpossible();
+            // Phase NC: annotate with the condition token so that
+            // CheckNullPointer reports the condition-aware message
+            // (nullPointerRedundantCheck) with a note at the condition site.
+            // Set on both paths so the surviving merged value carries it
+            // (mergeValueLists deduplicates by equalValue which ignores condition).
+            nullVal.assumeCondition(condRoot);
             state[operand->varId()] = {nullVal};
         }
 
@@ -1471,6 +1477,7 @@ static void applyConditionConstraint(const Token* condRoot,
                 nullVal.setKnown();
             else
                 nullVal.setImpossible();
+            nullVal.assumeCondition(condRoot);
             members[{objId, fieldId}] = {nullVal};
         }
 
@@ -1507,6 +1514,9 @@ static void applyConditionConstraint(const Token* condRoot,
             nullVal.setImpossible();
         else
             nullVal.setKnown();
+        // Phase NC: set condition on both paths so the merged Possible(0)
+        // carries the condition for the nullPointerRedundantCheck message.
+        nullVal.assumeCondition(condRoot);
         state[condRoot->varId()] = {nullVal};
         return;
     }
@@ -1521,6 +1531,7 @@ static void applyConditionConstraint(const Token* condRoot,
             nullVal.setImpossible();
         else
             nullVal.setKnown();
+        nullVal.assumeCondition(condRoot);
         members[{objId, fieldId}] = {nullVal};
         return;
     }
@@ -1608,14 +1619,22 @@ static void applyConditionConstraint(const Token* condRoot,
 
     if (varTok) {
         // Simple variable constraint (existing Phase N / integer logic).
+        // Phase NC: for pointer null checks (p == nullptr / p != nullptr),
+        // set the condition on both paths so the merged Possible(0) carries
+        // the condition for the nullPointerRedundantCheck message.
+        const bool isPtrNullCheck = isTrackedPtrVar(varTok) && constVal.intvalue == 0;
         if (isEq) {
             if (branchTaken) {
                 // if (x == val) { … }  →  then-block: x is Known val
                 constVal.setKnown();
+                if (isPtrNullCheck)
+                    constVal.assumeCondition(condRoot);
                 state[varTok->varId()] = {constVal};
             } else {
                 // else-path: x is NOT val
                 constVal.setImpossible();
+                if (isPtrNullCheck)
+                    constVal.assumeCondition(condRoot);
                 state[varTok->varId()] = {constVal};
             }
         } else {
@@ -1623,10 +1642,14 @@ static void applyConditionConstraint(const Token* condRoot,
             if (branchTaken) {
                 // if (x != val) { … }  →  then-path: x is NOT val
                 constVal.setImpossible();
+                if (isPtrNullCheck)
+                    constVal.assumeCondition(condRoot);
                 state[varTok->varId()] = {constVal};
             } else {
                 // else-path: x IS val
                 constVal.setKnown();
+                if (isPtrNullCheck)
+                    constVal.assumeCondition(condRoot);
                 state[varTok->varId()] = {constVal};
             }
         }
@@ -1638,18 +1661,22 @@ static void applyConditionConstraint(const Token* condRoot,
         if (isEq) {
             if (branchTaken) {
                 constVal.setKnown();
+                constVal.assumeCondition(condRoot);
                 members[{objId, fieldId}] = {constVal};
             } else {
                 constVal.setImpossible();
+                constVal.assumeCondition(condRoot);
                 members[{objId, fieldId}] = {constVal};
             }
         } else {
             // !=
             if (branchTaken) {
                 constVal.setImpossible();
+                constVal.assumeCondition(condRoot);
                 members[{objId, fieldId}] = {constVal};
             } else {
                 constVal.setKnown();
+                constVal.assumeCondition(condRoot);
                 members[{objId, fieldId}] = {constVal};
             }
         }
@@ -3376,11 +3403,64 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
 // 11. backwardAnalyzeBlock (Pass 2)
 // ===========================================================================
 
+/// Collect varIds of pointer variables that are being checked for non-null
+/// in condRoot (patterns where branchTaken=true gives Impossible(0)).
+///
+/// Handles:
+///   if (p)             → direct pointer truth-test
+///   if (p != nullptr)  → pointer inequality with null constant
+///   if (p != 0)        → same
+///   if (a && b)        → recurse into && operands
+///
+/// Phase BW-NP: used by mergeBackwardCondition to inject Possible(0) for
+/// these variables so that earlier null dereferences are warned about.
+static void collectPointerNonNullCheckVarIds(
+    const Token* condRoot,
+    std::unordered_set<nonneg int>& out)
+{
+    if (!condRoot)
+        return;
+    // Direct pointer truth-test: "if (p)"
+    if (isTrackedPtrVar(condRoot)) {
+        out.insert(condRoot->varId());
+        return;
+    }
+    // Inequality: "if (p != nullptr)" / "if (p != 0)" / reversed
+    if (condRoot->str() == "!=" &&
+        condRoot->astOperand1() && condRoot->astOperand2()) {
+        const DFState emptyState;
+        ValueFlow::Value val;
+        if (isTrackedPtrVar(condRoot->astOperand1()) &&
+            evalConstInt(condRoot->astOperand2(), emptyState, val) &&
+            val.intvalue == 0) {
+            out.insert(condRoot->astOperand1()->varId());
+        } else if (isTrackedPtrVar(condRoot->astOperand2()) &&
+                   evalConstInt(condRoot->astOperand1(), emptyState, val) &&
+                   val.intvalue == 0) {
+            out.insert(condRoot->astOperand2()->varId());
+        }
+        return;
+    }
+    // && chain: recurse into both operands
+    if (condRoot->str() == "&&") {
+        collectPointerNonNullCheckVarIds(condRoot->astOperand1(), out);
+        collectPointerNonNullCheckVarIds(condRoot->astOperand2(), out);
+    }
+}
+
 /// Apply a condition constraint backward into `state` (Pass 2 helper).
 ///
 /// Extracts value constraints from `condRoot` (via applyConditionConstraint),
 /// downgrades Known values to Possible (the branch may not always be taken,
 /// Requirement 4), and merges the results into `state` without duplicates.
+///
+/// Phase BW-NP: for pointer non-null-check conditions ("if (p)",
+/// "if (p != nullptr)") where branchTaken=true gives Impossible(0), also
+/// inject Possible(0) from the false-path (branchTaken=false gives Known(0)).
+/// The condition check implies the pointer MIGHT have been null before, so
+/// earlier dereferences should be warned about (Requirement 1).
+/// This targets only pointer null values to avoid changing behaviour for
+/// integer conditions such as "if (x != 0)" (Requirement 4).
 ///
 /// Used in two places in backwardAnalyzeBlock:
 ///   1. The '}' handler when jumping backward past an if-block.
@@ -3413,6 +3493,51 @@ static void mergeBackwardCondition(const Token* condRoot, DFState& state) {
                     [&v](const ValueFlow::Value& ex) { return ex.equalValue(v); });
                 if (!dup)
                     it->second.push_back(v);
+            }
+        }
+    }
+
+    // Phase BW-NP: inject Possible(0) for pointer variables that are
+    // non-null-checked in condRoot (e.g. "if (p)", "if (p != nullptr)").
+    //
+    // branchTaken=true gives Impossible(0) for these patterns, which the first
+    // loop above leaves as Impossible.  But Impossible(0) going backward means
+    // "the pointer is definitely NOT null before this check", which suppresses
+    // the very warning we want (nullPointerRedundantCheck).  We need Possible(0)
+    // instead: "the pointer MIGHT have been null, hence the check".
+    //
+    // Strategy: replace any Impossible(0) entry added by the first loop with
+    // Possible(0) (from the false-path: branchTaken=false → Known(0) → Possible(0)).
+    // Token::addValue's removeContradictions would remove Possible(0) if
+    // Impossible(0) is also present, so we must replace, not add alongside.
+    std::unordered_set<nonneg int> ptrNonNullVarIds;
+    collectPointerNonNullCheckVarIds(condRoot, ptrNonNullVarIds);
+    if (!ptrNonNullVarIds.empty()) {
+        DFState tmp2;
+        applyConditionConstraint(condRoot, tmp2, dummyMembers, dummyContainers,
+                                 /*branchTaken=*/false);
+        for (const nonneg int varId : ptrNonNullVarIds) {
+            const auto it2 = tmp2.find(varId);
+            if (it2 == tmp2.end())
+                continue;
+            for (ValueFlow::Value v : it2->second) {
+                if (!v.isKnown() || !v.isIntValue() || v.intvalue != 0)
+                    continue;  // only propagate Known(0) → Possible(0)
+                v.setPossible();
+                // Replace any Impossible(0) entry in state with Possible(0).
+                // Impossible(0) was injected by the branchTaken=true loop above
+                // for non-null-check patterns; it must be replaced so that
+                // Token::addValue's removeContradictions does not remove the
+                // Possible(0) we need for the nullPointerRedundantCheck warning.
+                auto it = state.find(varId);
+                if (it != state.end()) {
+                    for (ValueFlow::Value& existing : it->second) {
+                        if (existing.isImpossible() && existing.isIntValue() && existing.intvalue == 0)
+                            existing = v;  // replace Impossible(0) with Possible(0)
+                    }
+                } else {
+                    state[varId] = {v};
+                }
             }
         }
     }
@@ -3584,7 +3709,7 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
         // Variable read: annotate with backward constraint values
         // =================================================================
         if (tok->varId() > 0 && tok->isName()) {
-            
+
             annotateTok(const_cast<Token*>(tok), state);
         }
     }

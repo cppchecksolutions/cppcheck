@@ -1207,6 +1207,56 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXKnown(code, 4, 0));
         }
+
+        // N8: forward Possible(0) from "if (x)" carries Value::condition
+        //     pointing at the condition token (line 2) so that
+        //     CheckNullPointer emits nullPointerRedundantCheck with a note.
+        {
+            const char code[] = "void f(int *x) {\n"         // 1
+                                "  if (x) {}\n"              // 2  ← condition token
+                                "  (void)*x;\n"              // 3  ← Possible(0) w/ cond
+                                "}\n";
+            ASSERT(getErrorPathForX(code, 3).find("2,") != std::string::npos);
+        }
+
+        // N9: backward Possible(0) from "if (x == nullptr)" carries
+        //     Value::condition pointing at the condition token (line 3).
+        {
+            const char code[] = "void f(int *x) {\n"         // 1
+                                "  (void)x;\n"               // 2  ← backward: x possibly 0
+                                "  if (x == nullptr) {}\n"   // 3  ← condition token
+                                "}\n";
+            ASSERT(getErrorPathForX(code, 2).find("3,") != std::string::npos);
+        }
+
+        // N10: backward Possible(0) from "if (x)" direct pointer truth-test.
+        //      The check implies x might have been null before.
+        {
+            const char code[] = "void f(int *x) {\n"         // 1
+                                "  (void)x;\n"               // 2  ← backward: x possibly 0
+                                "  if (x) {}\n"              // 3
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 2, 0));
+        }
+
+        // N11: backward Possible(0) from "if (x != nullptr)" pointer inequality.
+        {
+            const char code[] = "void f(int *x) {\n"         // 1
+                                "  (void)x;\n"               // 2  ← backward: x possibly 0
+                                "  if (x != nullptr) {}\n"   // 3
+                                "}\n";
+            ASSERT(testValueOfXPossible(code, 2, 0));
+        }
+
+        // N12: backward Possible(0) from "if (x)" carries Value::condition
+        //      pointing at the condition token (line 3).
+        {
+            const char code[] = "void f(int *x) {\n"         // 1
+                                "  (void)x;\n"               // 2  ← backward: x possibly 0
+                                "  if (x) {}\n"              // 3  ← condition token
+                                "}\n";
+            ASSERT(getErrorPathForX(code, 2).find("3,") != std::string::npos);
+        }
     }
 
     // -----------------------------------------------------------------------
