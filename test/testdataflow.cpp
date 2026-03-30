@@ -1728,6 +1728,25 @@ private:
             ASSERT(!testValueOfXUninit(code, 6));
         }
 
+        // U27 (ticket #7614): uninitialized variable read in a for-loop condition.
+        //   Pattern: "for (; x != 0; x = x + 5) {}"
+        //   x is declared without an initializer and read in the condition
+        //   before any assignment.  Phase UA-FC must annotate the condition
+        //   tokens with the UNINIT state so CheckUninitVar can detect the use.
+        //
+        //   The bug: the for-loop increment clause "x = x + 5" caused x to be
+        //   erased from ctx.state and ctx.uninits (via dropWrittenVars /
+        //   hasTopLevelAssignment) BEFORE the condition tokens were annotated.
+        //   Phase UA-FC fixes this by annotating condition reads first.
+        {
+            const char code[] = "void f() {\n"              // 1
+                                "  int x;\n"                // 2  ← declared without init
+                                "  for (; x != 0; x = x + 5) {\n"  // 3  ← x is UNINIT in condition
+                                "  }\n"                     // 4
+                                "}\n";
+            ASSERT(testValueOfXUninit(code, 3));
+        }
+
         // U26 (FP): variable assigned inside a while(1) loop in a conditional
         //           branch, with the only non-returning exit being a break
         //           that follows the assignment.

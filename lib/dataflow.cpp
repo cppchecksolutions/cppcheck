@@ -182,6 +182,14 @@
  *     emplace_back increment the known size; pop_back decrements; clear
  *     resets to 0.
  *
+ *   Phase UA-FC — for-loop condition annotation (Requirement 2, ticket #7614):
+ *     Variable reads in the for-loop condition "for (init; cond; incr)" are
+ *     annotated with the current state after the init clause, before the
+ *     increment clause is processed.  Without this, the increment-clause
+ *     handler (dropWrittenVars / hasTopLevelAssignment) would erase the
+ *     variable from ctx.state and ctx.uninits first, hiding the UNINIT value
+ *     from the condition read and producing a false negative.
+ *
  *   Phase Cast — cast expression value propagation:
  *     evalConstInt and evalConstFloat look through C-style and C++ cast
  *     expressions so that assignments such as "int x = (int)5;" propagate
@@ -2803,6 +2811,22 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         // at least once, so the callee may initialize those variables.
                         // Mirrors the same treatment for while/do-while conditions.
                         clearConditionOutVars(initEnd, condEnd, ctx);
+
+                        // Phase UA-FC: annotate variable reads in the for-loop condition.
+                        // The condition is evaluated before the body and the increment,
+                        // so reads here execute with the state after the init clause —
+                        // potentially reading UNINIT variables declared before the loop
+                        // (ticket #7614).  Must be done BEFORE the increment-clause
+                        // processing below, which erases variables from ctx.state and
+                        // ctx.uninits via dropWrittenVars / hasTopLevelAssignment.
+                        for (Token* ct = const_cast<Token*>(initEnd->next());
+                             ct && ct != condEnd; ct = ct->next()) {
+                            if (ct->varId() > 0 && ct->isName()) {
+                                annotateTok(ct, ctx.state, branchDepth);
+                                annotateMemberTok(ct, ctx);
+                                annotateContainerTok(ct, ctx);
+                            }
+                        }
 
                         // Phase U2-FI: for-loop increment clause.
                         // The increment clause (condEnd+1 .. condClose) executes
