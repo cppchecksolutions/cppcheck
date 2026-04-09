@@ -592,7 +592,7 @@ $(libcppdir)/cppcheck.o: lib/cppcheck.cpp externals/picojson/picojson.h external
 $(libcppdir)/ctu.o: lib/ctu.cpp externals/tinyxml2/tinyxml2.h lib/astutils.h lib/check.h lib/config.h lib/ctu.h lib/errorlogger.h lib/errortypes.h lib/library.h lib/mathlib.h lib/path.h lib/smallvector.h lib/sourcelocation.h lib/standards.h lib/symboldatabase.h lib/templatesimplifier.h lib/token.h lib/tokenize.h lib/tokenlist.h lib/utils.h lib/vfvalue.h lib/xml.h
 	$(CXX) ${INCLUDE_FOR_LIB} $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $(libcppdir)/ctu.cpp
 
-$(libcppdir)/dataflow.o: lib/dataflow.cpp lib/astutils.h lib/config.h lib/dataflow.h lib/errortypes.h lib/library.h lib/mathlib.h lib/smallvector.h lib/sourcelocation.h lib/standards.h lib/symboldatabase.h lib/templatesimplifier.h lib/token.h lib/tokenlist.h lib/utils.h lib/vfvalue.h
+$(libcppdir)/dataflow.o: lib/dataflow.cpp lib/addoninfo.h lib/astutils.h lib/checkers.h lib/config.h lib/dataflow.h lib/errortypes.h lib/library.h lib/mathlib.h lib/platform.h lib/regex.h lib/settings.h lib/smallvector.h lib/sourcelocation.h lib/standards.h lib/symboldatabase.h lib/templatesimplifier.h lib/token.h lib/tokenlist.h lib/utils.h lib/vfvalue.h
 	$(CXX) ${INCLUDE_FOR_LIB} $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $(libcppdir)/dataflow.cpp
 
 $(libcppdir)/errorlogger.o: lib/errorlogger.cpp externals/tinyxml2/tinyxml2.h lib/addoninfo.h lib/check.h lib/checkers.h lib/color.h lib/config.h lib/cppcheck.h lib/errorlogger.h lib/errortypes.h lib/library.h lib/mathlib.h lib/path.h lib/platform.h lib/regex.h lib/settings.h lib/smallvector.h lib/standards.h lib/suppressions.h lib/templatesimplifier.h lib/token.h lib/tokenlist.h lib/utils.h lib/vfvalue.h lib/xml.h
