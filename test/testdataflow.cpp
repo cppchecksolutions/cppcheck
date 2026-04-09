@@ -1285,6 +1285,20 @@ private:
                                 "}\n";                                 // 4
             ASSERT(!testValueOfXPossible(code, 3, 0));
         }
+
+        // N15: try/catch — catch block terminates with return → no false positive.
+        // After "try { p = new T; } catch (...) { p = nullptr; return; }",
+        // the surviving path is the try-succeeded path where p is non-null.
+        // The analysis must NOT carry the catch-block null value past the catch.
+        {
+            const char code[] = "void f() {\n"                         // 1
+                                "  int *x = nullptr;\n"                // 2
+                                "  try { x = new int(1); }\n"         // 3
+                                "  catch (...) { x = nullptr; return; }\n" // 4
+                                "  (void)*x;\n"                        // 5  ← x must NOT be Known null
+                                "}\n";
+            ASSERT(!testValueOfXKnown(code, 5, 0));
+        }
     }
 
     // -----------------------------------------------------------------------

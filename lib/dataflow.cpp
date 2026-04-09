@@ -195,6 +195,15 @@
  *     expressions so that assignments such as "int x = (int)5;" propagate
  *     the constant value correctly.
  *
+ *   Phase TC — try/catch block handling (Requirement 4):
+ *     catch blocks are treated as alternative execution paths.  When a catch
+ *     block terminates unconditionally (return/throw), the surviving path is
+ *     the post-try path and the catch-block state is discarded.  When the
+ *     catch block falls through, the post-try and post-catch states are merged
+ *     at the join point.  This prevents stale null assignments inside
+ *     terminating catch blocks from producing false null-pointer positives on
+ *     the surviving (non-exceptional) path.
+ *
  * =========================================================================
  * FILE LAYOUT
  * =========================================================================
@@ -3050,6 +3059,55 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     }
                 }
             }
+            continue;
+        }
+
+        // =================================================================
+        // catch block handling
+        // =================================================================
+        //
+        // A catch block is an alternative execution path: it runs when an
+        // exception is thrown from the preceding try block.  The forward
+        // analysis processes the try block tokens in order (they are just
+        // walked through normally), so by the time we reach "catch", the
+        // analysis state reflects the post-try path.
+        //
+        // Two cases:
+        //   1. Catch block terminates (return/throw): the surviving path is
+        //      the post-try path — keep the current state and skip the catch.
+        //      This is the common pattern for "cleanup and return on error".
+        //   2. Catch block falls through: the state at the join point is the
+        //      merge of the post-try state and the post-catch state.
+        //
+        // Requirement 4 (no false positives): the catch handler prevents stale
+        // null assignments inside a terminating catch block from poisoning the
+        // surviving post-try state.
+        if (tok->str() == "catch") {
+            // Skip the catch parameter list '(' ... ')'
+            const Token* catchParen = tok->next();
+            if (!catchParen || catchParen->str() != "(")
+                continue;
+            const Token* catchParenClose = catchParen->link();
+            if (!catchParenClose)
+                continue;
+            const Token* catchOpen = catchParenClose->next();
+            if (!catchOpen || catchOpen->str() != "{")
+                continue;
+            const Token* catchClose = catchOpen->link();
+            if (!catchClose)
+                continue;
+
+            if (blockTerminates(catchOpen->next(), catchClose, settings)) {
+                // Case 1: catch always terminates — surviving path is post-try.
+                // Skip the catch block without modifying the current context.
+            } else {
+                // Case 2: catch may fall through — fork, analyze, and merge.
+                DFContext ctxCatch = ctx;
+                forwardAnalyzeBlock(const_cast<Token*>(catchOpen->next()), catchClose,
+                                    ctxCatch, branchDepth + 1, loopDepth, settings);
+                ctx = mergeContexts(ctx, ctxCatch);
+            }
+            tok = const_cast<Token*>(catchClose);
             continue;
         }
 
