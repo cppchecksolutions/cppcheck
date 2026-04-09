@@ -1272,6 +1272,19 @@ private:
             ASSERT(testValueOfXPossible(code, 3, 0));
             ASSERT(getErrorPathForX(code, 3).find("2,") != std::string::npos);
         }
+
+        // N14: false positive suppression — x appears in the '||' only as part
+        // of a complex expression (*x > 0), not as a direct pointer truth-test.
+        // Phase UA-PG must NOT inject Possible(0) for x in the RHS of '&&'.
+        // Reproduces a false positive from real-world code where a pointer was
+        // used in a member-access chain on one side of '||'.
+        {
+            const char code[] = "void f(int *x, int *q, bool b) {\n"  // 1
+                                "  if ((q || *x > 0) &&\n"            // 2  ← x in || via *x (not direct truth-test)
+                                "      *x == 1) {}\n"                 // 3  ← x must NOT be Possible(0)
+                                "}\n";                                 // 4
+            ASSERT(!testValueOfXPossible(code, 3, 0));
+        }
     }
 
     // -----------------------------------------------------------------------

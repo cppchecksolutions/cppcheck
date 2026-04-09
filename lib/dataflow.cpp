@@ -225,7 +225,8 @@
  *                 isInTrueBranchOfTernaryBySameVar,
  *                 isInFalseBranchOfNegatedTernaryBySameVar
  *   5b. Partial null-guard detection (Phase UA-PG, ticket #3054)
- *        subtreeContainsVar, lhsContainsVarInOr, isInPartiallyGuardedContext:
+ *        subtreeContainsVar, isDirectOrOperandForVar, lhsContainsVarInOr,
+ *        isInPartiallyGuardedContext:
  *        Detect "(p || q) && *p" where the OR guard does not exclusively
  *        protect p.  Inject Possible(0) so CheckNullPointer can warn.
  *   6. mergeStates / mergeMemberStates / mergeContexts
@@ -991,19 +992,56 @@ static bool subtreeContainsVar(const Token* tok, nonneg int varId) {
            subtreeContainsVar(tok->astOperand2(), varId);
 }
 
-/// Returns true when the LHS subtree of a '&&' contains varId inside an '||'
-/// expression.  This means the '&&' LHS is a disjunctive (OR) guard that
-/// mentions varId but does not exclusively guarantee that varId is non-null.
+/// Returns true when varId appears as a DIRECT pointer truth-test or null-test
+/// in the immediate operands of the '||' node at `orOp`.
 ///
-/// Example: LHS = "(p || q)" — p appears in an || so (p || q) is a partial
-/// guard: it guarantees at least one of p/q is non-null, but not p alone.
+/// A direct truth-test is the pointer variable itself ("p" in "p || q").
+/// A direct null-test is "!p" where p is the pointer variable.
+///
+/// This is deliberately stricter than subtreeContainsVar: it only returns true
+/// when the pointer is tested at the top level of the '||' arm, not when it
+/// appears deep in a complex sub-expression such as "p->field == value".
+/// Using subtreeContainsVar caused false positives when a pointer was used in
+/// a member-access chain on one side of '||' (e.g. "!b || p->get() == val")
+/// — the pointer was not acting as a null-guard there.
+static bool isDirectOrOperandForVar(const Token* orOp, nonneg int varId) {
+    if (!orOp || orOp->str() != "||")
+        return false;
+    const auto isVarTest = [varId](const Token* arm) -> bool {
+        if (!arm)
+            return false;
+        // Direct truth-test: "p"
+        if (arm->varId() == varId && isTrackedPtrVar(arm))
+            return true;
+        // Direct null-test: "!p"
+        if (arm->str() == "!" && arm->astOperand1() &&
+            arm->astOperand1()->varId() == varId &&
+            isTrackedPtrVar(arm->astOperand1()))
+            return true;
+        return false;
+    };
+    return isVarTest(orOp->astOperand1()) || isVarTest(orOp->astOperand2());
+}
+
+/// Returns true when the LHS subtree of a '&&' contains varId as a direct
+/// pointer truth-test inside an '||' expression.
+///
+/// Only counts when the variable itself ("p") or its negation ("!p") is an
+/// immediate operand of the '||', not when it appears in a complex expression
+/// like "p->field == value".  This prevents false positives from Phase UA-PG
+/// when a pointer is used in a member-access chain on one side of '||'.
+///
+/// Example matched: LHS = "(p || q)" — p is a direct truth-test in '||'.
+/// Example NOT matched: LHS = "(!b || p->get() == val)" — p is not a direct
+/// truth-test; it is used inside a complex sub-expression on one side of '||'.
 static bool lhsContainsVarInOr(const Token* lhs, nonneg int varId) {
     if (!lhs)
         return false;
-    // Direct || node: varId appears somewhere in this disjunction.
+    // Direct || node: check only immediate operands for a pointer truth-test.
     if (lhs->str() == "||")
-        return subtreeContainsVar(lhs->astOperand1(), varId) ||
-               subtreeContainsVar(lhs->astOperand2(), varId);
+        return isDirectOrOperandForVar(lhs, varId) ||
+               lhsContainsVarInOr(lhs->astOperand1(), varId) ||
+               lhsContainsVarInOr(lhs->astOperand2(), varId);
     // Chained &&: recurse into both operands.
     if (lhs->str() == "&&")
         return lhsContainsVarInOr(lhs->astOperand1(), varId) ||
