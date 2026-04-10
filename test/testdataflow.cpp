@@ -3379,6 +3379,47 @@ private:
                 return v.isIntValue() && v.intvalue == 0 && !v.isImpossible();
             }));
         }
+
+        // FP37: goto-based error path — backward analysis must not propagate
+        //       the "if (x)" null-check backward past a goto label and a
+        //       return statement, annotating x at the dereference site
+        //       with Possible(0) (false positive nullPointerRedundantCheck).
+        //       Regression for test1.c (etna_cmd_stream_new pattern):
+        //         x = calloc(...);
+        //         if (!x) { goto fail; }
+        //         x->size = size;   ← must NOT be Possible(0)
+        //         return x;
+        //       fail:
+        //         if (x)            ← backward check must not propagate above
+        //       Root cause: backwardAnalyzeBlock walked backward past the "fail:"
+        //       label and past "return", propagating Possible(0) for x to
+        //       the dereference site where no null-path exists at runtime.
+        //       Fix: clear backward state at goto labels and return statements.
+        {
+            // The function call at line 7 clears x from the forward state so that
+            // x at line 8 has no forward Impossible(0) to block the backward Possible(0).
+            // Without the fix, the backward "if (x)" at line 11 propagates Possible(0)
+            // backward past "fail:" and "return x", annotating x at line 8 with Possible(0)
+            // (false positive nullPointerRedundantCheck).
+            const char code[] =
+                "struct S { void *buf; int size; };\n"          // 1
+                "void del(struct S *p);\n"                      // 2
+                "void *alloc(int n);\n"                         // 3
+                "struct S *foo(int n) {\n"                      // 4
+                "  struct S *x = 0;\n"                          // 5
+                "  x = alloc(n);\n"                             // 6  clears x from forward state
+                "  if (!x) { goto fail; }\n"                    // 7  surviving: x=Impossible(0)
+                "  x->buf = alloc(n);\n"                        // 8  function call clears x from state
+                "  x->size = n;\n"                              // 9  x NOT in forward state here
+                "  return x;\n"                                 // 10
+                "  fail:\n"                                     // 11
+                "  if (x)\n"                                    // 12 backward: injects Possible(0)
+                "    del(x);\n"                                 // 13
+                "  return 0;\n"                                 // 14
+                "}\n";
+            // x at line 9 (the dereference site) must NOT carry Possible(0)
+            ASSERT(!testValueOfXPossible(code, 9, 0));
+        }
     }
 };
 

@@ -3930,6 +3930,36 @@ static void backwardAnalyzeBlock(const Token* start, const Token* end,
         }
 
         // =================================================================
+        // Goto label / return: clear backward state (Phase BW-goto)
+        // =================================================================
+        //
+        // Goto label — "name:":
+        //   Execution may arrive at a label from anywhere via goto, so any
+        //   backward constraint gathered from after the label cannot be reliably
+        //   propagated to code before the label.  Clearing state here is
+        //   conservative (false-negative direction) but prevents false positives
+        //   from propagating post-goto null checks backward through the label into
+        //   code only reachable before the goto fires (Requirement 4).
+        //   Same pattern as the forward-pass goto label handler.
+        //
+        // return statement:
+        //   A return is an unconditional exit; code before the return cannot
+        //   fall through to code after the return on the same path.  Backward
+        //   constraints from after the return (e.g. "if (x)" in an error-path
+        //   block only reachable via goto) must not be propagated backward past
+        //   the return into normal code.  Clearing prevents false positive
+        //   nullPointerRedundantCheck reports.
+        if (tok->str() == "return") {
+            state.clear();
+            continue;
+        }
+        if (tok->isName() && tok->str() != "case" && tok->str() != "default" &&
+            tok->next() && tok->next()->str() == ":") {
+            state.clear();
+            continue;
+        }
+
+        // =================================================================
         // Variable read: annotate with backward constraint values
         // =================================================================
         if (tok->varId() > 0 && tok->isName()) {
