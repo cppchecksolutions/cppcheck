@@ -3468,6 +3468,36 @@ private:
             // check must not leak into the post-macro state.
             ASSERT(!xPossibleNullAtLine5);
         }
+
+        // FP-flag: pointer guarded by a boolean flag — Possible(null) from a
+        // prior if(x) merge must not propagate into a later if(found) block.
+        //
+        //   RoutePoint* x = getPoint();  // state cleared after call
+        //   if (x) found = true;         // merge: x gets Possible(null)
+        //   if (found) {
+        //     use(x->m_lat);             // x must NOT be Possible(null) here
+        //   }
+        //
+        // Root cause: after merging the then-path (x=Impossible(0)) and
+        // else-path (x=Known(0)) at the first if, x becomes Possible(0).
+        // That Possible(0) was then annotated inside the second if-block,
+        // triggering a false nullPointerRedundantCheck warning.
+        // Fix: suppress Possible(0) null annotations inside conditional blocks
+        // (branchDepth > 0), same as the existing Possible(UNINIT) suppression.
+        {
+            const char code[] =
+                "struct RoutePoint { double m_lat; };\n"  // 1
+                "RoutePoint* getPoint();\n"               // 2
+                "void f() {\n"                            // 3
+                "  bool found = false;\n"                 // 4
+                "  RoutePoint* x = getPoint();\n"         // 5
+                "  if (x) found = true;\n"               // 6
+                "  if (found) {\n"                        // 7
+                "    double s = x->m_lat;\n"              // 8  ← x must NOT be Possible(null)
+                "  }\n"                                   // 9
+                "}\n";                                    // 10
+            ASSERT(!testValueOfXPossible(code, 8, 0));
+        }
     }
 };
 

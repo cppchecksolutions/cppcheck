@@ -1155,15 +1155,16 @@ static void annotateTok(Token* tok, const DFState& state, int branchDepth = 0) {
     for (const ValueFlow::Value& val : it->second) {
         if ((guardedRhs || guardedOrRhs || guardedTernary || guardedNegTernary) && val.isIntValue() && val.intvalue == 0 && !val.isImpossible())
             continue;
-        // Requirement 4 — conditional-UNINIT suppression:
-        // A Possible(UNINIT) value inside a conditional block may be guarded by
-        // a flag that correlates with initialization (pattern: flag=1 ↔ var initialized).
-        // The analysis does not track this correlation, so skip the annotation to
-        // avoid false positives.  Known(UNINIT) is still annotated — that means
-        // the variable is definitely uninitialized on the current path.
-        if (branchDepth > 0 &&
-            val.valueType == ValueFlow::Value::ValueType::UNINIT &&
-            val.isPossible())
+        // Requirement 4 — conditional Possible-value suppression:
+        // A Possible value inside a conditional block may be guarded by a flag
+        // that correlates with the condition that produced it (e.g. the pattern
+        // "if (p) found=true; … if (found) { use(p); }" — inside the second
+        // if, p is Possible(null) from the merge at the first if, but the flag
+        // guarantees p is non-null on the taken path).  The analysis does not
+        // track this flag-value correlation, so skip the annotation to avoid
+        // false positives (Requirement 4).  Known values are still annotated —
+        // they represent certainty on the current path, not a merge artifact.
+        if (branchDepth > 0 && val.isPossible())
             continue;
         tok->addValue(val);
     }
