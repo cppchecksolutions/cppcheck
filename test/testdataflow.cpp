@@ -1837,6 +1837,33 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 6));
         }
+
+        // U29 (FP): uninitialized variable read in dead code after an if/else
+        //           where both branches return.  The read is unreachable, so
+        //           the analysis must NOT annotate the variable as UNINIT.
+        //
+        //   Pattern (reproduces test1.c false positive):
+        //     void *x;
+        //     if (cond) { return; } else { return; }
+        //     if (x == 0) {}   ← dead code — x must NOT be UNINIT here
+        //
+        //   Root cause: after an if/else where both branches terminate, the
+        //   ctx is left unchanged (still contains the pre-if UNINIT state).
+        //   The walker continues into the unreachable code and annotates x.
+        //   Fix: clear ctx.state and ctx.uninits when both branches terminate.
+        {
+            const char code[] = "int cond();\n"                    // 1
+                                "void f() {\n"                     // 2
+                                "  int *x;\n"                      // 3  ← declared without init
+                                "  if (cond()) {\n"                // 4
+                                "    return;\n"                    // 5
+                                "  } else {\n"                     // 6
+                                "    return;\n"                    // 7
+                                "  }\n"                            // 8
+                                "  if (x == 0) {}\n"              // 9  ← dead code, x must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 9));
+        }
     }
 
     // -----------------------------------------------------------------------

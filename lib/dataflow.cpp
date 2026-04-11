@@ -2730,7 +2730,13 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                     resolveCondInits(ctx);           // Phase U-CI
                 } else if (!thenTerminates && !elseTerminates)
                     ctx = mergeContexts(ctxThen, ctxElse);
-                // else both terminate → dead code follows; ctx doesn't matter
+                else {
+                    // Both branches terminate → dead code follows.
+                    // Clear UNINIT state to prevent false positive annotations
+                    // on the unreachable subsequent code (Requirement 4).
+                    ctx.state.clear();
+                    ctx.uninits.clear();
+                }
 
                 tok = const_cast<Token*>(elseClose);
 
