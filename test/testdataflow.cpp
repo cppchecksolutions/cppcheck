@@ -3420,6 +3420,54 @@ private:
             // x at line 9 (the dereference site) must NOT carry Possible(0)
             ASSERT(!testValueOfXPossible(code, 9, 0));
         }
+
+        // FP38: null check inside an expanded macro must not inject Possible(null)
+        //       for the pointer after the macro call.
+        //
+        //       Pattern (bzip2 BZ_SETERR macro):
+        //         #define SET_ERR(e) { if (x != 0) x->f = e; }
+        //         void foo(struct S* x) {
+        //           SET_ERR(1);
+        //           (void)x;   ← x must NOT be Possible(null)
+        //         }
+        //
+        //       Root cause: applyConditionConstraint was called for the "if"
+        //       inside the macro, setting x=Known(0) on the else-path.  After
+        //       the no-else merge, x became Possible(0) on the surviving path,
+        //       causing a false nullPointerRedundantCheck.
+        //       Fix: skip applyConditionConstraint when the "if" token comes
+        //       from an expanded macro (tok->isExpandedMacro()).
+        //
+        //       Uses SimpleTokenizer2 to get real macro expansion so that the
+        //       macro-expanded "if" token has isExpandedMacro() == true.
+        {
+            const char code[] =
+                "#define SET_ERR(e) { if (x != 0) x->f = e; }\n"  // 1
+                "struct S { int f; int g; };\n"                     // 2
+                "void foo(struct S* x) {\n"                         // 3
+                "  SET_ERR(1);\n"                                    // 4
+                "  (void)x;\n"                                       // 5
+                "}\n";
+            // Use SimpleTokenizer2 so that SET_ERR(1) is fully preprocessed
+            // and the "if" token inside the expansion has isExpandedMacro() true.
+            SimpleTokenizer2 tokenizer2(settings, *this, code, "test.c");
+            ASSERT(tokenizer2.simplifyTokens1(""));
+            bool xPossibleNullAtLine5 = false;
+            for (const Token* tok = tokenizer2.tokens(); tok; tok = tok->next()) {
+                if (tok->str() != "x" || tok->linenr() != 5)
+                    continue;
+                if (std::any_of(tok->values().cbegin(), tok->values().cend(),
+                                [](const ValueFlow::Value& v) {
+                    return v.isIntValue() && v.isPossible() && v.intvalue == 0;
+                })) {
+                    xPossibleNullAtLine5 = true;
+                    break;
+                }
+            }
+            // x at line 5 must NOT be Possible(null) — macro-internal null
+            // check must not leak into the post-macro state.
+            ASSERT(!xPossibleNullAtLine5);
+        }
     }
 };
 

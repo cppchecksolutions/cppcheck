@@ -204,6 +204,15 @@
  *     terminating catch blocks from producing false null-pointer positives on
  *     the surviving (non-exceptional) path.
  *
+ *   Phase MC — macro-expanded if-condition suppression (Requirement 4):
+ *     When the "if" keyword is expanded from a macro (tok->isExpandedMacro()),
+ *     applyConditionConstraint is skipped entirely for that if-statement.
+ *     A null-check inside a macro (e.g. "if (p != NULL) p->x = v;") is an
+ *     internal safety guard, not a program-level assertion about the caller's
+ *     variable.  Applying the condition would merge a Possible(null) onto the
+ *     post-macro path and trigger a false nullPointerRedundantCheck warning at
+ *     the next dereference (Requirement 4 — no false positives).
+ *
  * =========================================================================
  * FILE LAYOUT
  * =========================================================================
@@ -2662,10 +2671,22 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Apply the if-condition constraint inside the then-block.
             // condRoot is the AST root of the condition expression.
             const Token* condRoot = parenOpen->astOperand2();
+            // Requirement 4 — no false positives from macro-expanded conditions:
+            // When the "if" token comes from a macro expansion, the null check
+            // inside the macro is an implementation detail (e.g. a safety guard
+            // such as "if (p != NULL) p->x = v").  Applying the condition
+            // constraint produces a spurious Possible(null) for the variable
+            // on the post-merge path, which then triggers a false
+            // nullPointerRedundantCheck warning at the next use.
+            // Skip applyConditionConstraint entirely when the "if" is expanded
+            // from a macro so that the macro's internal guard does not poison
+            // the state seen by code after the macro call.
             // Phase MN/C: also pass member and container state so member pointer
             // and container.empty() conditions are handled.
-            applyConditionConstraint(condRoot, ctxThen.state, ctxThen.members, ctxThen.containers, /*branchTaken=*/true);
-            applyConditionConstraint(condRoot, ctxElse.state, ctxElse.members, ctxElse.containers, /*branchTaken=*/false);
+            if (!tok->isExpandedMacro()) {
+                applyConditionConstraint(condRoot, ctxThen.state, ctxThen.members, ctxThen.containers, /*branchTaken=*/true);
+                applyConditionConstraint(condRoot, ctxElse.state, ctxElse.members, ctxElse.containers, /*branchTaken=*/false);
+            }
 
             // Analyse the then-block.
             forwardAnalyzeBlock(const_cast<Token*>(thenOpen->next()), thenClose,
