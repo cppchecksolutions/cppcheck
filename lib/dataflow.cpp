@@ -3260,6 +3260,14 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // "? ... : x") is processed.  Erasing from ctx.uninits/state here
             // prevents a false UNINIT annotation on the later read of x.
             // This handles all value types (UNINIT, integer, float, pointer).
+            //
+            // Phase U-ArgAssign-TL: also detect plain '=' assignments at the
+            // TOP LEVEL of the argument list (not wrapped in extra parens), e.g.
+            // "foo(vm, res = make())".  The LHS variable is written before the
+            // outer call, so it must be erased from ctx.uninits/state here.
+            // Without this, clearCallClobberableState would preserve the UNINIT
+            // entry (UNINIT-only, not address-taken) and subsequent reads would
+            // be falsely annotated as UNINIT (Requirement 4 — no false positives).
             for (Token* argTok = tok->next();
                  argTok && argTok != tok->link();
                  argTok = argTok->next()) {
@@ -3280,8 +3288,17 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
                         argTok = argTok->link();
                     continue;
                 }
+                // Phase U-ArgAssign-TL: top-level plain '=' in the argument list.
+                if (argTok->str() == "=" && !argTok->isComparisonOp() &&
+                    argTok->astOperand1() &&
+                    argTok->astOperand1()->varId() > 0) {
+                    const nonneg int vid = argTok->astOperand1()->varId();
+                    ctx.uninits.erase(vid);
+                    ctx.state.erase(vid);
+                    continue;
+                }
                 if (argTok->varId() > 0 && argTok->isName()) {
-                    
+
                     annotateTok(argTok, ctx.state, branchDepth);
                     annotateMemberTok(argTok, ctx);
                     annotateContainerTok(argTok, ctx);

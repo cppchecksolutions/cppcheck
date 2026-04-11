@@ -3526,6 +3526,32 @@ private:
             ASSERT(!xPossibleNullAtLine5);
         }
 
+        // FP39: variable assigned in a top-level function-call argument
+        //       (e.g. "foo(bar, res = make())") must NOT be reported as UNINIT
+        //       when used after the outer call.
+        //       Pattern from jitterc (jitter VM code-generator):
+        //         struct jitterc_instruction * res;
+        //         jitterc_vm_append_instruction(vm, res = jitterc_make_instruction());
+        //         res->name = ...;   ← false positive uninitvar
+        //       Root cause: Phase U-ArgAssign only scanned for assignments inside
+        //       '(...)' groups.  A top-level assignment "res = func()" at the
+        //       argument level (not wrapped in extra parens) was never processed,
+        //       so 'res' stayed in ctx.uninits.  clearCallClobberableState then
+        //       preserved the UNINIT entry (UNINIT-only, not address-taken), and
+        //       the subsequent read was falsely annotated as UNINIT.
+        //       Fix: in the argument annotation loop, detect plain '=' at the
+        //       top level and erase the LHS variable from ctx.uninits/state.
+        {
+            const char code[] = "void append(void*, void*);\n"  // 1
+                                "void* make();\n"               // 2
+                                "void f(void* vm) {\n"          // 3
+                                "  void* x;\n"                  // 4
+                                "  append(vm, x = make());\n"   // 5
+                                "  (void)x;\n"                  // 6  must NOT be UNINIT
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
+
         // FP-flag: pointer guarded by a boolean flag — Possible(null) from a
         // prior if(x) merge must not propagate into a later if(found) block.
         //
