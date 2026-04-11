@@ -204,6 +204,19 @@
  *     terminating catch blocks from producing false null-pointer positives on
  *     the surviving (non-exceptional) path.
  *
+ *   Phase U-ArgAssign — assignment inside function-call argument list
+ *       (Requirement 4):
+ *     When a function argument list contains an assignment inside a
+ *     parenthesised group (e.g. "(x = get()) == NULL ? \":\" : x"), the
+ *     argument annotation loop skips '(...)' groups to avoid double-processing.
+ *     Without special handling, the assignment is missed and the subsequent
+ *     read of x in the ternary false-branch is falsely annotated as UNINIT.
+ *     Phase U-ArgAssign fixes this: before each '(...)' group is skipped, the
+ *     tokens inside are scanned for plain '=' assignments. Any assigned
+ *     variable is erased from ctx.uninits and ctx.state so that subsequent
+ *     reads of that variable within the same argument list are not falsely
+ *     flagged. This handles all value types (UNINIT, integer, float, pointer).
+ *
  *   Phase MC — macro-expanded if-condition suppression (Requirement 4):
  *     When the "if" keyword is expanded from a macro (tok->isExpandedMacro()),
  *     applyConditionConstraint is skipped entirely for that if-statement.
@@ -3232,10 +3245,31 @@ static void forwardAnalyzeBlock(Token* start, const Token* end,
             // Annotate each argument token with the current state BEFORE
             // clearing.  Walk between '(' and ')' — skip nested calls to
             // avoid double-processing.
+            //
+            // Phase U-ArgAssign: before skipping a '(...)' group, scan inside
+            // it for plain '=' assignments.  All arguments are evaluated before
+            // the call, so an assignment inside a paren group (e.g.
+            // "(x = get())") definitely initialises x before any subsequent
+            // token in the argument list (e.g. the false-branch of a ternary
+            // "? ... : x") is processed.  Erasing from ctx.uninits/state here
+            // prevents a false UNINIT annotation on the later read of x.
+            // This handles all value types (UNINIT, integer, float, pointer).
             for (Token* argTok = tok->next();
                  argTok && argTok != tok->link();
                  argTok = argTok->next()) {
                 if (argTok->str() == "(") {
+                    // Scan inside the group for plain assignments first.
+                    for (const Token* inner = argTok->next();
+                         inner && inner != argTok->link();
+                         inner = inner->next()) {
+                        if (inner->str() == "=" && !inner->isComparisonOp() &&
+                            inner->astOperand1() &&
+                            inner->astOperand1()->varId() > 0) {
+                            const nonneg int vid = inner->astOperand1()->varId();
+                            ctx.uninits.erase(vid);
+                            ctx.state.erase(vid);
+                        }
+                    }
                     if (argTok->link())
                         argTok = argTok->link();
                     continue;

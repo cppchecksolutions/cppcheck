@@ -1807,6 +1807,36 @@ private:
                                 "}\n";
             ASSERT(!testValueOfXUninit(code, 11));
         }
+
+        // U28 (FP): variable assigned inside a parenthesised group that is an
+        //           argument to a function call, then read later in the same
+        //           argument list (e.g. ternary false-branch).  The annotation
+        //           loop skips '(...)' groups, so without a pre-pass the
+        //           assignment is missed and the ternary-branch read is falsely
+        //           annotated as UNINIT.
+        //
+        //   Pattern (pointer):
+        //     use(buf, (x = get()) == 0 ? ":" : x)
+        //     — x is assigned in (x = get()), then read in the false-branch.
+        //   Pattern (int):
+        //     use((x = get()) > 0 ? x : 0)
+        //     — x is assigned in (x = get()), then read in the true-branch.
+        //   Pattern (float):
+        //     use((x = getf()) > 0.0f ? x : 0.0f)
+        //     — same as int but for float.
+        //
+        //   None of these should produce a false UNINIT annotation.
+        {
+            // Pointer case (reproduces the original test1.c report)
+            const char code[] = "char *get(void);\n"                    // 1
+                                "void use(char *, const char *);\n"     // 2
+                                "void f() {\n"                          // 3
+                                "  const char *x;\n"                    // 4  ← declared without init
+                                "  char buf[100];\n"                    // 5
+                                "  use(buf, (x = get()) == 0 ? \":\" : x);\n"  // 6  ← x NOT uninit here
+                                "}\n";
+            ASSERT(!testValueOfXUninit(code, 6));
+        }
     }
 
     // -----------------------------------------------------------------------
