@@ -1484,6 +1484,10 @@ bool ImportProject::importCppcheckGuiProject(std::istream &istr, Settings &setti
         else if (strcmp(name, CppcheckXml::UndefinesElementName) == 0) {
             for (const std::string &u : readXmlStringList(node, "", CppcheckXml::UndefineName, nullptr))
                 temp.userUndefs.insert(u);
+        } else if (strcmp(name, CppcheckXml::UserIncludeElementName) == 0) {
+            const char* i = node->GetText();
+            if (i)
+                temp.userIncludes.push_back(i);
         } else if (strcmp(name, CppcheckXml::ImportProjectElementName) == 0) {
             const std::string t_str = empty_if_null(node->GetText());
             if (!t_str.empty())
@@ -1605,6 +1609,7 @@ bool ImportProject::importCppcheckGuiProject(std::istream &istr, Settings &setti
     settings.includePaths = temp.includePaths; // TODO: append instead of overwrite
     settings.userDefines = temp.userDefines; // TODO: append instead of overwrite
     settings.userUndefs = temp.userUndefs; // TODO: append instead of overwrite
+    settings.userIncludes = temp.userIncludes; // TODO: append instead of overwrite
     for (const std::string &addon : temp.addons)
         settings.addons.emplace(addon);
     settings.clang = temp.clang;

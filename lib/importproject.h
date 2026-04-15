@@ -151,6 +151,7 @@ namespace CppcheckXml {
     static constexpr char DefineNameAttrib[] = "name";
     static constexpr char UndefinesElementName[] = "undefines";
     static constexpr char UndefineName[] = "undefine";
+    static constexpr char UserIncludeElementName[] = "user-include";
     static constexpr char PathsElementName[] = "paths";
     static constexpr char PathName[] = "dir";
     static constexpr char PathNameAttrib[] = "name";

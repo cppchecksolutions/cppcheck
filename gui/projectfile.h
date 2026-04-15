@@ -141,6 +141,14 @@ public:
         return mUndefines;
     }
 
+    const QString& getUserInclude() const {
+        return mUserInclude;
+    }
+
+    void setUserInclude(const QString& userInclude) {
+        mUserInclude = userInclude;
+    }
+
     /**
      * @brief Get list of paths to check.
      * @return list of paths.
@@ -600,6 +608,9 @@ private:
      * @brief List of undefines.
      */
     QStringList mUndefines;
+
+    /** @brief --include file */
+    QString mUserInclude;
 
     /**
      * @brief List of paths to check.

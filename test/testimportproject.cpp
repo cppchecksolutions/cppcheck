@@ -482,6 +482,7 @@ private:
                                "    <paths>\n"
                                "        <dir name=\"cli/\"/>\n"
                                "    </paths>\n"
+                               "    <user-include>gcc-macros.h</user-include>\n"
                                "    <exclude>\n"
                                "        <path name=\"gui/temp/\"/>\n"
                                "    </exclude>\n"
@@ -497,6 +498,8 @@ private:
         ASSERT_EQUALS("cli/", project.guiProject.pathNames[0]);
         ASSERT_EQUALS(1, s.includePaths.size());
         ASSERT_EQUALS("lib/", s.includePaths.front());
+        ASSERT_EQUALS(1, s.userIncludes.size());
+        ASSERT_EQUALS("gcc-macros.h", s.userIncludes.front());
         ASSERT_EQUALS(true, s.inlineSuppressions);
     }
 
