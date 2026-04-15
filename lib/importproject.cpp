@@ -1487,7 +1487,7 @@ bool ImportProject::importCppcheckGuiProject(std::istream &istr, Settings &setti
         } else if (strcmp(name, CppcheckXml::UserIncludeElementName) == 0) {
             const char* i = node->GetText();
             if (i)
-                temp.userIncludes.push_back(i);
+                temp.userIncludes.emplace_back(i);
         } else if (strcmp(name, CppcheckXml::ImportProjectElementName) == 0) {
             const std::string t_str = empty_if_null(node->GetText());
             if (!t_str.empty())
