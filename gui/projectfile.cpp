@@ -1195,5 +1195,5 @@ QStringList ProjectFile::getSearchPaths(const QString& dir) const {
     const QString applicationFilePath = QCoreApplication::applicationFilePath();
     const QString appPath = QFileInfo(applicationFilePath).canonicalPath();
     const QString datadir = getDataDir();
-    return getSearchPaths(inf.canonicalFilePath(), appPath, datadir, dir);
+    return getSearchPaths(inf.canonicalPath(), appPath, datadir, dir);
 }
