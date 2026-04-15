@@ -350,7 +350,7 @@
             <string>Include file</string>
            </property>
            <property name="buddy">
-            <cstring>mEditDefines</cstring>
+            <cstring>mEditUserInclude</cstring>
            </property>
           </widget>
          </item>
