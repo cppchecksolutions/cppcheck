@@ -189,10 +189,6 @@ public:
         return mPlatform;
     }
 
-    const QString& getProjectName() const {
-        return mProjectName;
-    }
-
     void setProjectName(QString projectName) {
         mProjectName = std::move(projectName);
     }
