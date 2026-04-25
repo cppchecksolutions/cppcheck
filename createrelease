@@ -52,7 +52,7 @@
 # Create 2.18.x branch
 # git checkout -b 2.18.x ; git push -u origin 2.18.x
 # in fork:
-#  * add upstream: git remote add upstream git@github.com:danmar/cppcheck.git
+#  * add upstream: git remote add upstream git@github.com:/cppcheck-opensource//cppcheck.git
 #  * add branch:   git fetch upstream 2.19.x
 #
 # Release notes:
@@ -124,7 +124,7 @@
 # * daca: cd /var && nice tar -cJf ~/daca.tar.xz daca@home
 # * git: git checkout -f && git checkout main && git pull && tar -cJf git.tar.xz .git
 # * git log 2.16.0..2.17.0 > Changelog
-# * mkdir out && python3 ~/cppchecksolutions/release/getWorkflowAndIssueLogs.py -r danmar/cppcheck -t 2.15.0 -p out
+# * mkdir out && python3 ~/cppchecksolutions/release/getWorkflowAndIssueLogs.py -r /cppcheck-opensource//cppcheck -t 2.15.0 -p out
 
 # Folder/tag to use
 folder=$1

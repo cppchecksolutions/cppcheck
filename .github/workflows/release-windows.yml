@@ -22,7 +22,7 @@ jobs:
   build:
 
     runs-on: windows-2025
-    if: ${{ github.repository_owner == 'danmar' }}
+    if: ${{ github.repository_owner == 'cppcheck-opensource' }}
 
     env:
       PYTHON_VERSION: 3.14

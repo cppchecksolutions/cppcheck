@@ -2,7 +2,7 @@
 
 |release-windows|OSS-Fuzz|Coverity Scan Build Status|include-what-you-use|License|
 |:--:|:--:|:--:|:--:|:--:|
-|[![release-windows](https://github.com/danmar/cppcheck/actions/workflows/release-windows.yml/badge.svg?branch=main)](https://github.com/danmar/cppcheck/actions/workflows/release-windows.yml)|[![OSS-Fuzz](https://oss-fuzz-build-logs.storage.googleapis.com/badges/cppcheck.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:cppcheck)|[![Coverity Scan Build Status](https://img.shields.io/coverity/scan/512.svg)](https://scan.coverity.com/projects/512)|[![include-what-you-use](https://github.com/danmar/cppcheck/actions/workflows/iwyu.yml/badge.svg?branch=main)](https://github.com/danmar/cppcheck/actions/workflows/iwyu.yml)|[![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)](https://opensource.org/licenses/GPL-3.0)|
+|[![release-windows](https://github.com/cppcheck-opensource/cppcheck/actions/workflows/release-windows.yml/badge.svg?branch=main)](https://github.com/cppcheck-opensource/cppcheck/actions/workflows/release-windows.yml)|[![OSS-Fuzz](https://oss-fuzz-build-logs.storage.googleapis.com/badges/cppcheck.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:cppcheck)|[![Coverity Scan Build Status](https://img.shields.io/coverity/scan/512.svg)](https://scan.coverity.com/projects/512)|[![include-what-you-use](https://github.com/cppcheck-opensource/cppcheck/actions/workflows/iwyu.yml/badge.svg?branch=main)](https://github.com/cppcheck-opensource/cppcheck/actions/workflows/iwyu.yml)|[![License](https://img.shields.io/badge/license-GPL3.0-blue.svg)](https://opensource.org/licenses/GPL-3.0)|
 
 ## About the name
 
@@ -263,7 +263,7 @@ Besides building yourself on the platform of your choice there are also several 
 Official packages are maintained by the Cppcheck team.
 
 * (Windows) An official Windows installer is available via the official Cppcheck SourceForge page: <https://cppcheck.sourceforge.io>.
-* (Windows) Official builds of the current development versions are available via the [release-windows](https://github.com/danmar/cppcheck/actions/workflows/release-windows.yml) workflow. They are built nightly for the `main` branch and for each commit for release branches. As these are development versions please refrain from using these in production environments!
+* (Windows) Official builds of the current development versions are available via the [release-windows](https://github.com/cppcheck-opensource/cppcheck/actions/workflows/release-windows.yml) workflow. They are built nightly for the `main` branch and for each commit for release branches. As these are development versions please refrain from using these in production environments!
   * A portable package (i.e. does not require installation) is available as the `portable` artifact. This is still a work-in-progress - see <https://trac.cppcheck.net/ticket/10771> for details.
   * An installer is available via the `installer` artifact.
 * (Multi-Platform) A premium version with additional features provided by the original author of Cppcheck is available for purchase via <https://www.cppcheck.com>.
@@ -274,7 +274,7 @@ Third-party packages are ***not*** maintained by the Cppcheck team but their res
 
 *Note:* The following list is purely informational and listed in no particular order.
 
-*Note:* Please always try to obtain the package from the primary official source of your operating system/distro first and make sure you are getting the latest released/tagged version (see <https://github.com/danmar/cppcheck/tags>). Some packages might not carry the latest patch version though.
+*Note:* Please always try to obtain the package from the primary official source of your operating system/distro first and make sure you are getting the latest released/tagged version (see <https://github.com/cppcheck-opensource/cppcheck/tags>). Some packages might not carry the latest patch version though.
 
 *Note:* Some issues might be related to additional patches carried by the builds in these packages or by the packaging itself. Please try to verify the issue with an official build before reporting it upstream. Otherwise you might need toreport it to the respective maintainer of the package.
 

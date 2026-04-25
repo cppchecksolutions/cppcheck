@@ -12,7 +12,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'danmar' }}
+    if: ${{ github.repository_owner == 'cppcheck-opensource' }}
     steps:
     - uses: actions/checkout@v4
       with:

@@ -172,7 +172,7 @@ jobs:
 
       - name: Fetch corpus
         run: |
-          wget https://github.com/danmar/cppcheck/archive/refs/tags/2.8.tar.gz
+          wget https://github.com/cppcheck-opensource/cppcheck/archive/refs/tags/2.8.tar.gz
           tar xvf 2.8.tar.gz
 
       - name: CMake (corpus / no test)

@@ -1044,7 +1044,7 @@ Cppcheck is distributed with a few addons which are listed below.
 
 ### `namingng.py`
 
-[`namingng.py`](https://github.com/danmar/cppcheck/blob/main/addons/namingng.py) allows you to configure and check naming conventions.
+[`namingng.py`](https://github.com/cppcheck-opensource/cppcheck/blob/main/addons/namingng.py) allows you to configure and check naming conventions.
 
 You need to have a configuration file that defines your naming conventions. By default the filename `namingng.config.json` is used but there is an option so you can use any filename you want.
 
@@ -1070,11 +1070,11 @@ Example configuration of naming conventions:
 
 ### `threadsafety.py`
 
-[`threadsafety.py`](https://github.com/danmar/cppcheck/blob/main/addons/threadsafety.py) analyses Cppcheck dump files to locate thread safety issues like static local objects used by multiple threads.
+[`threadsafety.py`](https://github.com/cppcheck-opensource/cppcheck/blob/main/addons/threadsafety.py) analyses Cppcheck dump files to locate thread safety issues like static local objects used by multiple threads.
 
 ### `y2038.py`
 
-[`y2038.py`](https://github.com/danmar/cppcheck/blob/main/addons/y2038.py) checks source code for [year 2038 problem](https://en.wikipedia.org/wiki/Year_2038_problem) safety.
+[`y2038.py`](https://github.com/cppcheck-opensource/cppcheck/blob/main/addons/y2038.py) checks source code for [year 2038 problem](https://en.wikipedia.org/wiki/Year_2038_problem) safety.
 
 ## Running addons
 
