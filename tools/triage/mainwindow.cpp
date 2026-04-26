@@ -137,7 +137,7 @@ void MainWindow::load(QTextStream &textStream)
         QString line = textStream.readLine();
         if (line.isNull())
             break;
-        if (line.startsWith("ftp://") || (line.startsWith(DACA2_PACKAGES) && line.endsWith(".tar.xz"))) {
+        if (line.startsWith("ftp://") || line.startsWith("https://") || (line.startsWith(DACA2_PACKAGES) && line.endsWith(".tar.xz"))) {
             local = line.startsWith(DACA2_PACKAGES) && line.endsWith(".tar.xz");
             url = line;
             if (!errorMessage.isEmpty())
@@ -293,7 +293,7 @@ void MainWindow::showResult(QListWidgetItem *item)
 {
     ui->statusBar->clearMessage();
     const bool local = item->text().startsWith(DACA2_PACKAGES);
-    if (!item->text().startsWith("ftp://") && !local)
+    if (!item->text().startsWith("ftp://") && !item->text().startsWith("https://") && !local)
         return;
     const QStringList lines = item->text().split("\n");
     if (lines.size() < 2)
