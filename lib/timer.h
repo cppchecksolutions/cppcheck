@@ -23,7 +23,8 @@
 #include "config.h"
 
 #include <chrono>
-#include <cstdint>
+#include <cstddef>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,15 +32,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-enum class ShowTime : std::uint8_t {
-    NONE,
-    FILE,
-    FILE_TOTAL,
-    SUMMARY,
-    TOP5_SUMMARY,
-    TOP5_FILE
-};
 
 class CPPCHECKLIB TimerResultsIntf {
 public:
@@ -66,7 +58,7 @@ class CPPCHECKLIB WARN_UNUSED TimerResults : public TimerResultsIntf {
 public:
     TimerResults() = default;
 
-    void showResults(ShowTime mode, bool metrics = true) const;
+    void showResults(size_t max_results = std::numeric_limits<size_t>::max(), bool metrics = true) const;
     void addResults(const std::string& name, std::chrono::milliseconds duration) override;
 
     void reset();
@@ -81,7 +73,7 @@ public:
     using Clock = std::chrono::high_resolution_clock;
     using TimePoint = std::chrono::time_point<Clock>;
 
-    Timer(std::string str, ShowTime showtimeMode, TimerResultsIntf* timerResults = nullptr);
+    explicit Timer(std::string str, TimerResultsIntf* timerResults = nullptr);
     ~Timer();
 
     Timer(const Timer&) = delete;
@@ -90,14 +82,13 @@ public:
     void stop();
 
     template<class TFunc>
-    static void run(std::string str, ShowTime showtimeMode, TimerResultsIntf* timerResults, const TFunc& f) {
-        Timer t(std::move(str), showtimeMode, timerResults);
+    static void run(std::string str, TimerResultsIntf* timerResults, const TFunc& f) {
+        Timer t(std::move(str), timerResults);
         f();
     }
 
 private:
     const std::string mName;
-    ShowTime mMode{};
     TimePoint mStart;
     TimerResultsIntf* mResults{};
 };
@@ -105,7 +96,7 @@ private:
 class CPPCHECKLIB OneShotTimer
 {
 public:
-    OneShotTimer(std::string name, ShowTime showtime);
+    explicit OneShotTimer(std::string name);
 private:
     std::unique_ptr<TimerResultsIntf> mResults;
     std::unique_ptr<Timer> mTimer;

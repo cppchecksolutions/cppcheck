@@ -19,8 +19,6 @@
 #include "timer.h"
 
 #include <algorithm>
-#include <cassert>
-#include <cstddef>
 #include <iostream>
 #include <utility>
 #include <vector>
@@ -38,12 +36,9 @@ namespace {
 
 // TODO: this does not include any file context when SHOWTIME_FILE thus rendering it useless - should we include the logging with the progress logging?
 // that could also get rid of the broader locking
-void TimerResults::showResults(ShowTime mode, bool metrics) const
+void TimerResults::showResults(size_t max_results, bool metrics) const
 {
-    if (mode == ShowTime::NONE)
-        return;
     std::vector<dataElementType> data;
-
     {
         std::lock_guard<std::mutex> l(mResultsSync);
 
@@ -57,7 +52,7 @@ void TimerResults::showResults(ShowTime mode, bool metrics) const
 
     size_t ordinal = 1; // maybe it would be nice to have an ordinal in output later!
     for (auto iter=data.cbegin(); iter!=data.cend(); ++iter) {
-        if ((mode != ShowTime::TOP5_FILE && mode != ShowTime::TOP5_SUMMARY) || (ordinal<=5)) {
+        if (ordinal <= max_results) {
             const double sec = iter->second.getSeconds().count();
             std::cout << iter->first << ": " << sec << "s";
             if (metrics) {
@@ -85,12 +80,14 @@ void TimerResults::reset()
     mResults.clear();
 }
 
-Timer::Timer(std::string str, ShowTime showtimeMode, TimerResultsIntf* timerResults)
+Timer::Timer(std::string str, TimerResultsIntf* timerResults)
     : mName(std::move(str))
-    , mMode(showtimeMode)
-    , mStart(Clock::now())
     , mResults(timerResults)
-{}
+{
+    if (!mResults)
+        return;
+    mStart = Clock::now();
+}
 
 Timer::~Timer()
 {
@@ -99,18 +96,13 @@ Timer::~Timer()
 
 void Timer::stop()
 {
-    if (mMode == ShowTime::NONE)
+    if (mStart == TimePoint{})
         return;
-    if (mStart != TimePoint{}) {
-        if (!mResults) {
-            assert(false);
-        }
-        else {
-            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - mStart);
-            mResults->addResults(mName, diff);
-        }
-    }
-    mMode = ShowTime::NONE; // prevent multiple stops
+
+    const auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - mStart);
+    mResults->addResults(mName, diff);
+
+    mStart = TimePoint{}; // prevent multiple stops
 }
 
 static std::string durationToString(std::chrono::milliseconds duration)
@@ -138,11 +130,8 @@ static std::string durationToString(std::chrono::milliseconds duration)
     return (ellapsedTime + secondsStr + "s");
 }
 
-OneShotTimer::OneShotTimer(std::string name, ShowTime showtime)
+OneShotTimer::OneShotTimer(std::string name)
 {
-    if (showtime == ShowTime::NONE)
-        return;
-
     class MyResults : public TimerResultsIntf
     {
     private:
@@ -156,5 +145,5 @@ OneShotTimer::OneShotTimer(std::string name, ShowTime showtime)
     };
 
     mResults.reset(new MyResults);
-    mTimer.reset(new Timer(std::move(name), showtime, mResults.get()));
+    mTimer.reset(new Timer(std::move(name), mResults.get()));
 }

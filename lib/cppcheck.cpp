@@ -924,8 +924,8 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
         return mLogger->exitcode();
 
     std::unique_ptr<OneShotTimer> checkTimeTimer;
-    if (mSettings.showtime == ShowTime::FILE || mSettings.showtime == ShowTime::FILE_TOTAL || mSettings.showtime == ShowTime::TOP5_FILE)
-        checkTimeTimer.reset(new OneShotTimer("Check time: " + file.spath(), mSettings.showtime));
+    if (mSettings.showtime == Settings::ShowTime::FILE || mSettings.showtime == Settings::ShowTime::FILE_TOTAL || mSettings.showtime == Settings::ShowTime::TOP5_FILE)
+        checkTimeTimer.reset(new OneShotTimer("Check time: " + file.spath()));
 
     if (!mSettings.quiet) {
         std::string fixedpath = Path::toNativeSeparators(file.spath());
@@ -1045,7 +1045,7 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
         // Get configurations..
         std::set<std::string> configurations;
         if (maxConfigs > 1) {
-            Timer::run("Preprocessor::getConfigs", mSettings.showtime, mTimerResults, [&]() {
+            Timer::run("Preprocessor::getConfigs", mTimerResults, [&]() {
                 configurations = preprocessor.getConfigs();
             });
         } else {
@@ -1130,7 +1130,7 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
 
             if (mSettings.preprocessOnly) {
                 std::string codeWithoutCfg;
-                Timer::run("Preprocessor::getcode", mSettings.showtime, mTimerResults, [&]() {
+                Timer::run("Preprocessor::getcode", mTimerResults, [&]() {
                     codeWithoutCfg = preprocessor.getcode(currentConfig, files, true);
                 });
 
@@ -1154,7 +1154,7 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
             {
                 bool skipCfg = false;
                 // Create tokens, skip rest of iteration if failed
-                Timer::run("Tokenizer::createTokens", mSettings.showtime, mTimerResults, [&]() {
+                Timer::run("Tokenizer::createTokens", mTimerResults, [&]() {
                     simplecpp::OutputList outputList_cfg;
                     simplecpp::TokenList tokensP = preprocessor.preprocess(currentConfig, files, outputList_cfg);
                     const simplecpp::Output* o = preprocessor.handleErrors(outputList_cfg);
@@ -1180,8 +1180,7 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
 
             Tokenizer tokenizer(std::move(tokenlist), mErrorLogger);
             try {
-                if (mSettings.showtime != ShowTime::NONE)
-                    tokenizer.setTimerResults(mTimerResults);
+                tokenizer.setTimerResults(mTimerResults);
                 tokenizer.setDirectives(directives); // TODO: how to avoid repeated copies?
 
                 // locations macros
@@ -1294,8 +1293,12 @@ unsigned int CppCheck::checkInternal(const FileWithDetails& file, const std::str
     // TODO: clear earlier?
     mLogger->clear();
 
-    if (mTimerResults && (mSettings.showtime == ShowTime::FILE || mSettings.showtime == ShowTime::TOP5_FILE))
-        mTimerResults->showResults(mSettings.showtime);
+    if (mTimerResults) {
+        if (mSettings.showtime == Settings::ShowTime::FILE)
+            mTimerResults->showResults();
+        else if (mSettings.showtime == Settings::ShowTime::TOP5_FILE)
+            mTimerResults->showResults(5);
+    }
 
     return mLogger->exitcode();
 }
@@ -1354,7 +1357,7 @@ void CppCheck::checkNormalTokens(const Tokenizer &tokenizer, AnalyzerInformation
                 return;
             }
 
-            Timer::run(check->name() + "::runChecks", mSettings.showtime, mTimerResults, [&]() {
+            Timer::run(check->name() + "::runChecks", mTimerResults, [&]() {
                 check->runChecks(tokenizer, &mErrorLogger);
             });
         }
@@ -1489,7 +1492,7 @@ void CppCheck::executeAddons(const std::string& dumpFile, const FileWithDetails&
 {
     if (!dumpFile.empty()) {
         std::vector<std::string> f{dumpFile};
-        Timer::run("CppCheck::executeAddons", mSettings.showtime, mTimerResults, [&]() {
+        Timer::run("CppCheck::executeAddons", mTimerResults, [&]() {
             executeAddons(f, file.spath());
         });
     }
