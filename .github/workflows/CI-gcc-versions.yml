@@ -1,0 +1,38 @@
+# Syntax reference https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions
+# Environment reference https://help.github.com/en/actions/reference/virtual-environments-for-github-hosted-runners
+name: CI-gcc-versions
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'releases/**'
+      - '2.*'
+    tags:
+      - '2.*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+
+    strategy:
+      matrix:
+        image: ["gcc:6.5", "gcc:7.5", "gcc:8.5", "gcc:9.5"]
+      fail-fast: false
+
+    runs-on: ubuntu-22.04
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build cppcheck
+        run: |
+          make -j$(nproc) CXXOPTS="-Werror"
