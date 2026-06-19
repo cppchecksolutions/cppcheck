@@ -1289,7 +1289,7 @@ void CheckOtherImpl::checkVariableScope()
                 tok = tok->link();
 
                 // parse else if blocks..
-            } else if (Token::simpleMatch(tok, "else { if (") && tok->next()->isSimplifiedScope() && Token::simpleMatch(tok->linkAt(3), ") {")) {
+            } else if (Token::simpleMatch(tok, "else { if (") && tok->next()->isInsertedBrace() && Token::simpleMatch(tok->linkAt(3), ") {")) {
                 tok = tok->next();
             } else if (tok->varId() == var->declarationId() || tok->str() == "goto") {
                 reduce = false;
@@ -1415,7 +1415,7 @@ bool CheckOtherImpl::checkInnerScope(const Token *tok, const Variable* var, bool
                 if (scope->type == ScopeType::eSwitch)
                     return false; // Used in outer switch scope - unsafe or impossible to reduce scope
 
-                if (scope->bodyStart && scope->bodyStart->isSimplifiedScope())
+                if (scope->bodyStart && scope->bodyStart->isSimplifiedIfInitStmt())
                     return false; // simplified if/for/switch init statement
             }
             if (var->isArrayOrPointer()) {

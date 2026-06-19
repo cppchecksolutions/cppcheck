@@ -140,6 +140,7 @@ private:
 
         TEST_CASE(whileAddBraces);
         TEST_CASE(whileAddBracesLabels);
+        TEST_CASE(whileAddBracesDump);
 
         TEST_CASE(doWhileAddBraces);
         TEST_CASE(doWhileAddBracesLabels);
@@ -1530,6 +1531,17 @@ private:
                                            "    catch(...) { --x; }\n"
                                            "}"));
         ASSERT_EQUALS("", filter_valueflow(errout_str()));
+    }
+
+    void whileAddBracesDump() {
+        const char code[] = "void f(){while(a);}";
+        SimpleTokenizer tokenizer(settingsDefault, *this, false);
+        ASSERT(tokenizer.tokenize(code));
+        ASSERT(Token::simpleMatch(tokenizer.tokens(), "void f ( ) { while ( a ) { ; } }"));
+        std::ostringstream ostr;
+        tokenizer.dump(ostr);
+        const std::string dump = ostr.str();
+        ASSERT(dump.find("isInsertedBrace=\"true\"") != std::string::npos);
     }
 
     void doWhileAddBraces() {
