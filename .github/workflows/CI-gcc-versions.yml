@@ -20,7 +20,7 @@ jobs:
 
     strategy:
       matrix:
-        image: ["gcc:6.5", "gcc:7.5", "gcc:8.5", "gcc:9.5"]
+        image: ["ghcr.io/cppcheck-opensource/gcc:5.4", "ghcr.io/cppcheck-opensource/gcc:6.5", "ghcr.io/cppcheck-opensource/gcc:7.5", "ghcr.io/cppcheck-opensource/gcc:8.5", "ghcr.io/cppcheck-opensource/gcc:9.5"]
       fail-fast: false
 
     runs-on: ubuntu-22.04
