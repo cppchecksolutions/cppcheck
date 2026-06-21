@@ -1,5 +1,5 @@
-# Syntax reference https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions
-# Environment reference https://help.github.com/en/actions/reference/virtual-environments-for-github-hosted-runners
+# the gcc images we use here are copied from the official gcc images on docker hub
+
 name: gcc-versions
 
 on:
