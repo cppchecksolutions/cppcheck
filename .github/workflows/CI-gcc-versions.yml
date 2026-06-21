@@ -25,9 +25,6 @@ jobs:
 
     runs-on: ubuntu-22.04
 
-    container:
-      image: ${{ matrix.image }}
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,4 +32,4 @@ jobs:
 
       - name: Build cppcheck
         run: |
-          make -j$(nproc) CXXOPTS="-Werror"
+          docker run --rm -v ${{ github.workspace }}:/src -w /src ${{ matrix.image }} make -j$(nproc) CXXOPTS="-Werror"
