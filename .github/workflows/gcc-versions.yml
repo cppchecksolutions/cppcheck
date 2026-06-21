@@ -1,3 +1,4 @@
+# the purpose of this github action is to test that cppcheck source code can be compiled using old gcc versions.
 # the gcc images we use here are copied from the official gcc images on docker hub
 
 name: gcc-versions
