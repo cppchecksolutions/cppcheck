@@ -432,6 +432,29 @@ typedef int MISRA_5_6_VIOLATION;
     assert stderr == '{}:2:13: style: misra violation (use --rule-texts=<file> to get proper output) [misra-c2012-2.3]\ntypedef int MISRA_5_6_VIOLATION;\n            ^\n'.format(test_file)
 
 
+def test_report_type_misra_c_2025_20_6(tmpdir):  # #15017
+    """ using a preprocessor directive as a macro parameter is a MISRA C 20.6 violation """
+    test_file = os.path.join(tmpdir, 'test.c')
+    with open(test_file, 'wt') as f:
+        f.write("""
+#define A(X) X
+
+A(
+#ifdef __GNUC__
+    1
+#else
+    0
+#endif
+)
+""")
+
+    args = ['--template=simple', '--report-type=misra-c-2025', test_file]
+
+    exitcode, stdout, stderr = cppcheck(args)
+    assert exitcode == 0, stdout if stdout else stderr
+    assert stderr == "{}:5:1: Required: failed to expand 'A', it is invalid to use a preprocessor directive as macro parameter [20.6]\n".format(test_file)
+
+
 def test_addon_y2038(tmpdir):
     test_file = os.path.join(tmpdir, 'test.cpp')
     # TODO: trigger warning
