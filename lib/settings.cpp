@@ -795,15 +795,21 @@ bool Settings::isPremiumEnabled(const char id[]) const
         return false;
     if (premiumArgs.find("autosar") != std::string::npos && autosarCheckers.count(id))
         return true;
-    if (premiumArgs.find("cert-c-") != std::string::npos && certCCheckers.count(id))
-        return true;
     if (premiumArgs.find("cert-c++") != std::string::npos && certCppCheckers.count(id))
+        return true;
+    if (premiumArgs.find("cert-cpp") != std::string::npos && certCppCheckers.count(id))
+        return true;
+    if (premiumArgs.find("cert-c") != std::string::npos && certCCheckers.count(id))
         return true;
     if (premiumArgs.find("misra-c-") != std::string::npos && (misrac2012Checkers.count(id) || misrac2023Checkers.count(id) || misrac2025Checkers.count(id)))
         return true;
     if (premiumArgs.find("misra-c++-2008") != std::string::npos && misracpp2008Checkers.count(id))
         return true;
+    if (premiumArgs.find("misra-cpp-2008") != std::string::npos && misracpp2008Checkers.count(id))
+        return true;
     if (premiumArgs.find("misra-c++-2023") != std::string::npos && misracpp2023Checkers.count(id))
+        return true;
+    if (premiumArgs.find("misra-cpp-2023") != std::string::npos && misracpp2023Checkers.count(id))
         return true;
     return false;
 }

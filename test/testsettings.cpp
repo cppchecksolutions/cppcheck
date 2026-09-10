@@ -42,6 +42,8 @@ private:
         TEST_CASE(getMaxConfigsDefines);
         TEST_CASE(getMaxConfigsDefinesAndOpt);
         TEST_CASE(getMaxConfigsOptAndProject);
+
+        TEST_CASE(isPremiumEnabledCert);
     }
 
     void simpleEnableGroup() const {
@@ -355,6 +357,14 @@ private:
         ASSERT_EQUALS(3, s.getMaxConfigs());
         s.maxConfigsProject = 10;
         ASSERT_EQUALS(3, s.getMaxConfigs());
+    }
+
+    void isPremiumEnabledCert() const {
+        Settings s;
+        s.premiumArgs = "cert-c-2016";
+        ASSERT(s.isPremiumEnabled("uninitvar"));
+        s.premiumArgs = "cert-c";
+        ASSERT(s.isPremiumEnabled("uninitvar"));
     }
 };
 
