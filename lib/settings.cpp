@@ -791,26 +791,25 @@ static const std::set<std::string> misracpp2023Checkers{
 
 bool Settings::isPremiumEnabled(const char id[]) const
 {
-    if (premiumArgs.empty())
-        return false;
-    if (premiumArgs.find("autosar") != std::string::npos && autosarCheckers.count(id))
-        return true;
-    if (premiumArgs.find("cert-c++") != std::string::npos && certCppCheckers.count(id))
-        return true;
-    if (premiumArgs.find("cert-cpp") != std::string::npos && certCppCheckers.count(id))
-        return true;
-    if (premiumArgs.find("cert-c") != std::string::npos && certCCheckers.count(id))
-        return true;
-    if (premiumArgs.find("misra-c-") != std::string::npos && (misrac2012Checkers.count(id) || misrac2023Checkers.count(id) || misrac2025Checkers.count(id)))
-        return true;
-    if (premiumArgs.find("misra-c++-2008") != std::string::npos && misracpp2008Checkers.count(id))
-        return true;
-    if (premiumArgs.find("misra-cpp-2008") != std::string::npos && misracpp2008Checkers.count(id))
-        return true;
-    if (premiumArgs.find("misra-c++-2023") != std::string::npos && misracpp2023Checkers.count(id))
-        return true;
-    if (premiumArgs.find("misra-cpp-2023") != std::string::npos && misracpp2023Checkers.count(id))
-        return true;
+    for (std::string arg: splitString(premiumArgs, ' ')) {
+        std::transform(arg.cbegin(), arg.cend(), arg.begin(), [](char c) { return c=='+' ? 'p' : c; });
+        if (startsWith(arg, "autosar") && autosarCheckers.count(id))
+            return true;
+        if (startsWith(arg, "cert-cpp") && certCppCheckers.count(id))
+            return true;
+        if (startsWith(arg, "cert-c") && certCCheckers.count(id))
+            return true;
+        if (startsWith(arg, "misra-c-2012") && misrac2012Checkers.count(id))
+            return true;
+        if (startsWith(arg, "misra-c-2023") && misrac2023Checkers.count(id))
+            return true;
+        if (startsWith(arg, "misra-c-2025") && misrac2025Checkers.count(id))
+            return true;
+        if (startsWith(arg, "misra-cpp-2008") && misracpp2008Checkers.count(id))
+            return true;
+        if (startsWith(arg, "misra-cpp-2023") && misracpp2023Checkers.count(id))
+            return true;
+    }
     return false;
 }
 
