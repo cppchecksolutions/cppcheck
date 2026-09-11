@@ -793,21 +793,21 @@ bool Settings::isPremiumEnabled(const char id[]) const
 {
     for (std::string arg: splitString(premiumArgs, ' ')) {
         std::transform(arg.cbegin(), arg.cend(), arg.begin(), [](char c) { return c=='+' ? 'p' : c; });
-        if (startsWith(arg, "autosar") && autosarCheckers.count(id))
+        if (startsWith(arg, "--autosar") && autosarCheckers.count(id))
             return true;
-        if (startsWith(arg, "cert-cpp") && certCppCheckers.count(id))
+        if (startsWith(arg, "--cert-cpp") && certCppCheckers.count(id))
             return true;
-        if (startsWith(arg, "cert-c") && certCCheckers.count(id))
+        if (startsWith(arg, "--cert-c") && certCCheckers.count(id))
             return true;
-        if (startsWith(arg, "misra-c-2012") && misrac2012Checkers.count(id))
+        if (startsWith(arg, "--misra-c-2012") && misrac2012Checkers.count(id))
             return true;
-        if (startsWith(arg, "misra-c-2023") && misrac2023Checkers.count(id))
+        if (startsWith(arg, "--misra-c-2023") && misrac2023Checkers.count(id))
             return true;
-        if (startsWith(arg, "misra-c-2025") && misrac2025Checkers.count(id))
+        if (startsWith(arg, "--misra-c-2025") && misrac2025Checkers.count(id))
             return true;
-        if (startsWith(arg, "misra-cpp-2008") && misracpp2008Checkers.count(id))
+        if (startsWith(arg, "--misra-cpp-2008") && misracpp2008Checkers.count(id))
             return true;
-        if (startsWith(arg, "misra-cpp-2023") && misracpp2023Checkers.count(id))
+        if (startsWith(arg, "--misra-cpp-2023") && misracpp2023Checkers.count(id))
             return true;
     }
     return false;

@@ -362,31 +362,31 @@ private:
 
     void isPremiumEnabledCert() const {
         Settings s;
-        s.premiumArgs = "cert-c-2016";
+        s.premiumArgs = "--cert-c-2016";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "cert-c";
+        s.premiumArgs = "--cert-c";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "cert-c++";
+        s.premiumArgs = "--cert-c++";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "cert-cpp";
+        s.premiumArgs = "--cert-cpp";
         ASSERT(s.isPremiumEnabled("uninitvar"));
     }
 
     void isPremiumEnabledMisra() const {
         Settings s;
-        s.premiumArgs = "misra-c-2012";
+        s.premiumArgs = "--misra-c-2012";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-c-2023";
+        s.premiumArgs = "--misra-c-2023";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-c-2025";
+        s.premiumArgs = "--misra-c-2025";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-cpp-2008";
+        s.premiumArgs = "--misra-cpp-2008";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-c++-2008";
+        s.premiumArgs = "--misra-c++-2008";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-cpp-2023";
+        s.premiumArgs = "--misra-cpp-2023";
         ASSERT(s.isPremiumEnabled("uninitvar"));
-        s.premiumArgs = "misra-c++-2023";
+        s.premiumArgs = "--misra-c++-2023";
         ASSERT(s.isPremiumEnabled("uninitvar"));
     }
 };
