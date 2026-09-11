@@ -366,6 +366,8 @@ private:
         ASSERT(s.isPremiumEnabled("uninitvar"));
         s.premiumArgs = "--cert-c";
         ASSERT(s.isPremiumEnabled("uninitvar"));
+        s.premiumArgs = "--cert-c:all";
+        ASSERT(s.isPremiumEnabled("uninitvar"));
         s.premiumArgs = "--cert-c++";
         ASSERT(s.isPremiumEnabled("uninitvar"));
         s.premiumArgs = "--cert-cpp";
