@@ -12512,7 +12512,7 @@ private:
               "    label:\n"
               "}\n", dinit(CheckOptions, $.settings = &s));
         ASSERT_EQUALS("", errout_str());
-        s.premiumArgs = "--premium=misra-c-2012"; // <- activates unusedLabel checking
+        s.premiumArgs = "--misra-c-2012"; // <- activates unusedLabel checking
         check("void f() {\n"
               "    label:\n"
               "}\n", dinit(CheckOptions, $.settings = &s));
