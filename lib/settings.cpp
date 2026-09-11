@@ -792,7 +792,9 @@ static const std::set<std::string> misracpp2023Checkers{
 bool Settings::isPremiumEnabled(const char id[]) const
 {
     for (std::string arg: splitString(premiumArgs, ' ')) {
-        std::transform(arg.cbegin(), arg.cend(), arg.begin(), [](char c) { return c=='+' ? 'p' : c; });
+        std::transform(arg.cbegin(), arg.cend(), arg.begin(), [](char c) {
+            return c=='+' ? 'p' : c;
+        });
         if (endsWith(arg, ":all"))
             arg.erase(arg.size()-4);
         if (arg == "--autosar" && autosarCheckers.count(id))
