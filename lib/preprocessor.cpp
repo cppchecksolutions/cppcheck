@@ -1067,6 +1067,7 @@ void Preprocessor::getErrorMessages(ErrorLogger &errorLogger, const Settings &se
     preprocessor.missingInclude(loc, "", SystemHeader);
     preprocessor.error(loc, "message", simplecpp::Output::ERROR);
     preprocessor.error(loc, "message", simplecpp::Output::SYNTAX_ERROR);
+    preprocessor.error(loc, "message", simplecpp::Output::DIRECTIVE_AS_MACRO_PARAMETER);
     preprocessor.error(loc, "message", simplecpp::Output::UNHANDLED_CHAR_ERROR);
     preprocessor.error(loc, "message", simplecpp::Output::INCLUDE_NESTED_TOO_DEEPLY);
     preprocessor.error(loc, "message", simplecpp::Output::FILE_NOT_FOUND);

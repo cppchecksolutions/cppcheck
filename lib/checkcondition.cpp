@@ -1516,9 +1516,7 @@ void CheckConditionImpl::clarifyConditionError(const Token *tok, bool assign, bo
 
 void CheckConditionImpl::alwaysTrueFalse()
 {
-    const bool pedantic = mSettings.isPremiumEnabled("alwaysTrue") ||
-                          mSettings.isPremiumEnabled("alwaysFalse") ||
-                          mSettings.isPremiumEnabled("knownConditionTrueFalse");
+    const bool pedantic = mSettings.isPremiumEnabled("knownConditionTrueFalse");
 
     if (!pedantic && !mSettings.severity.isEnabled(Severity::style))
         return;
