@@ -3844,13 +3844,13 @@ const Check::FileInfo * CheckClass::loadFileInfoFromXml(const tinyxml2::XMLEleme
 static ErrorMessage oneDefinitionRuleViolationErrorMessage(std::list<ErrorMessage::FileLocation> locationList, const std::string &file0, const std::string &symbolName)
 {
     return ErrorMessage(std::move(locationList),
-                         file0,
-                         Severity::error,
-                         "$symbol:" + symbolName +
-                         "\nThe one definition rule is violated, different classes/structs have the same name '$symbol'",
-                         "ctuOneDefinitionRuleViolation",
-                         CWE_ONE_DEFINITION_RULE,
-                         Certainty::normal);
+                        file0,
+                        Severity::error,
+                        "$symbol:" + symbolName +
+                        "\nThe one definition rule is violated, different classes/structs have the same name '$symbol'",
+                        "ctuOneDefinitionRuleViolation",
+                        CWE_ONE_DEFINITION_RULE,
+                        Certainty::normal);
 }
 
 bool CheckClass::analyseWholeProgram(const CTU::FileInfo &ctu, const std::list<const Check::FileInfo*> &fileInfo, const Settings& settings, ErrorLogger &errorLogger)
