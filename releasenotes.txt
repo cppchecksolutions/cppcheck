@@ -20,7 +20,8 @@ Import project:
 -
 
 Infrastructure & dependencies:
--
+- The platform arm64-wchar_t2.xml was renamed to arm64-llp64-wchar_t2.xml. if you used this platform you can either change your cppcheck command or create a arm64-wchar_t2.xml file.
+- The platform arm64-wchar_t4.xml was renamed to arm64-lp64-wchar_t4.xml. if you used this platform you can either change your cppcheck command or create a arm64-wchar_t4.xml file.
 
 Other:
 -

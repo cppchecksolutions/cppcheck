@@ -140,8 +140,8 @@
               <File Id='aix_ppc64.xml' Name='aix_ppc64.xml' Source='$(var.PtfsDir)\aix_ppc64.xml' />
               <File Id='arm32wchar_t2.xml' Name='arm32-wchar_t2.xml' Source='$(var.PtfsDir)\arm32-wchar_t2.xml' />
               <File Id='arm32wchar_t4.xml' Name='arm32-wchar_t4.xml' Source='$(var.PtfsDir)\arm32-wchar_t4.xml' />
-              <File Id='arm64wchar_t2.xml' Name='arm64-wchar_t2.xml' Source='$(var.PtfsDir)\arm64-wchar_t2.xml' />
-              <File Id='arm64wchar_t4.xml' Name='arm64-wchar_t4.xml' Source='$(var.PtfsDir)\arm64-wchar_t4.xml' />
+              <File Id='arm64llp64wchar_t2.xml' Name='arm64-llp64-wchar_t2.xml' Source='$(var.PtfsDir)\arm64-llp64-wchar_t2.xml' />
+              <File Id='arm64lp64wchar_t4.xml' Name='arm64-lp64-wchar_t4.xml' Source='$(var.PtfsDir)\arm64-lp64-wchar_t4.xml' />
               <File Id='avr8.xml' Name='avr8.xml' Source='$(var.PtfsDir)\avr8.xml' />
               <File Id='elbrus_e1cp.xml' Name='elbrus-e1cp.xml' Source='$(var.PtfsDir)\elbrus-e1cp.xml' />
               <File Id='pic8.xml' Name='pic8.xml' Source='$(var.PtfsDir)\pic8.xml' />
