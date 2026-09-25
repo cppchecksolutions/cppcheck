@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- 64-bit ARM Linux (AArch64 LP64 ABI). This describes the default setup. -->
+<!-- 64-bit ARM Linux (AArch64 LP64 ABI). This describes the default setup. This platform file may also be suitable for bare-metal and RTOS targets (e.g. Zephyr, FreeRTOS) that use the AArch64 LP64 ABI. -->
 <platform>
   <char_bit>8</char_bit>
   <default-sign>unsigned</default-sign>
