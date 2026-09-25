@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- 64-bit ARM Linux (AArch64 LP64 ABI), GCC and Clang. This describes the default setup. -->
+<!-- 64-bit ARM Linux (AArch64 LP64 ABI). This describes the default setup. -->
 <platform>
   <char_bit>8</char_bit>
   <default-sign>unsigned</default-sign>
