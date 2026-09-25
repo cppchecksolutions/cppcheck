@@ -20,12 +20,8 @@ Import project:
 -
 
 Infrastructure & dependencies:
-- arm64 platform files:
-  - arm64-wchar_t2.xml was renamed to arm64-windows.xml.
-  - arm64-wchar_t4.xml was renamed to arm64-linux.xml.
-  - Added arm64 platform file arm64-macos.xml (Apple Silicon).
-  - The arm64 platform files describe the default setup for that OS.
-  - If you have used the old arm64-* files and can't change your cppcheck command, you can copy the old platform files.
+- Added arm64 platform files arm64-windows.xml, arm64-linux.xml and arm64-macos.xml (Apple Silicon).
+  These describe the default setup for that OS. The arm64-wchar_t2.xml and arm64-wchar_t4.xml files are kept.
 
 Other:
 -

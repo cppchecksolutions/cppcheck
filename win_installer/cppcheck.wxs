@@ -143,6 +143,8 @@
               <File Id='arm64linux.xml' Name='arm64-linux.xml' Source='$(var.PtfsDir)\arm64-linux.xml' />
               <File Id='arm64macos.xml' Name='arm64-macos.xml' Source='$(var.PtfsDir)\arm64-macos.xml' />
               <File Id='arm64windows.xml' Name='arm64-windows.xml' Source='$(var.PtfsDir)\arm64-windows.xml' />
+              <File Id='arm64wchar_t2.xml' Name='arm64-wchar_t2.xml' Source='$(var.PtfsDir)\arm64-wchar_t2.xml' />
+              <File Id='arm64wchar_t4.xml' Name='arm64-wchar_t4.xml' Source='$(var.PtfsDir)\arm64-wchar_t4.xml' />
               <File Id='avr8.xml' Name='avr8.xml' Source='$(var.PtfsDir)\avr8.xml' />
               <File Id='elbrus_e1cp.xml' Name='elbrus-e1cp.xml' Source='$(var.PtfsDir)\elbrus-e1cp.xml' />
               <File Id='pic8.xml' Name='pic8.xml' Source='$(var.PtfsDir)\pic8.xml' />
