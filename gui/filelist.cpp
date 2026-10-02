@@ -104,7 +104,7 @@ QStringList FileList::getFileList()
     return applyExcludeList();
 }
 
-QStringList FileList::getUnmatchedExcludes() const
+const QStringList& FileList::getUnmatchedExcludes() &
 {
     return mUnmatchedExcludes;
 }

@@ -68,7 +68,7 @@ public:
      * @brief Return list of exclude paths that did not match any file in the last getFileList() call
      * @return list of unmatched excludes
      */
-    QStringList getUnmatchedExcludes() const;
+    const QStringList& getUnmatchedExcludes() &;
 
     /**
      * @brief Add list of paths to exclusion list.
