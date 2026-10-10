@@ -128,6 +128,20 @@ def test_log(tmpdir):
     assert_cppcheck(args, ec_exp=0, err_exp=[], out_exp=out_lines)
 
 
+def test_include(tmp_path):
+    # the declaration before the #include is needed so the header is seen in the AST dump after tokens have been created
+    test_file = tmp_path / 'test.c'
+    with open(test_file, 'wt') as f:
+        f.write('#include "test.h"')
+
+    with open(tmp_path / 'test.h', 'wt') as f:
+        f.write('int x;\n')
+
+    exitcode, stdout, stderr = cppcheck(['-q', '--clang', '--debug', str(test_file)])
+    assert exitcode == 0, stderr if not stdout else stdout
+    assert '##file {}\n\n1: int x@var2 ;\n'.format(tmp_path / 'test.h') in stdout, stdout
+
+
 def test_warning(tmpdir):  # #12424
     test_file = os.path.join(tmpdir, 'test_2')
     with open(test_file, 'wt') as f:

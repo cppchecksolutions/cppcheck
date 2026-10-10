@@ -116,6 +116,7 @@ private:
         TEST_CASE(vardecl5);
         TEST_CASE(vardecl6);
         TEST_CASE(vardecl7);
+        TEST_CASE(vardeclInHeader);
         TEST_CASE(whileStmt1);
         TEST_CASE(whileStmt2);
 
@@ -1038,6 +1039,15 @@ private:
     void vardecl7() {
         const char clang[] = "`-VarDecl 0x2071f20 <1.cpp:2:1, col:23> col:9 start 'void *(*)(void *)'";
         ASSERT_EQUALS("void * * start@1 ;", parse(clang));
+    }
+
+    void vardeclInHeader() {
+        // a new file is seen after tokens have been created
+        const char clang[] = "|-VarDecl 0x32b8aa0 <1.c:1:1, col:5> col:5 a 'int'\n"
+                             "`-VarDecl 0x32b8b78 <1.h:1:1, col:5> col:5 b 'int'";
+
+        ASSERT_EQUALS("int a@1 ; int b@2 ;",
+                      parse(clang));
     }
 
     void whileStmt1() {
