@@ -129,7 +129,6 @@ def test_log(tmpdir):
 
 
 def test_include(tmp_path):
-    # the declaration before the #include is needed so the header is seen in the AST dump after tokens have been created
     test_file = tmp_path / 'test.c'
     with open(test_file, 'wt') as f:
         f.write('#include "test.h"')
@@ -139,7 +138,9 @@ def test_include(tmp_path):
 
     exitcode, stdout, stderr = cppcheck(['-q', '--clang', '--debug', str(test_file)])
     assert exitcode == 0, stderr if not stdout else stdout
-    assert '##file {}\n\n1: int x@var2 ;\n'.format(tmp_path / 'test.h') in stdout, stdout
+    # the number of empty lines after "##file" depends on the builtin declarations in the clang AST dump
+    assert '##file {}\n'.format(tmp_path / 'test.h') in stdout, stdout
+    assert '\n1: int x@var1 ;\n' in stdout, stdout
 
 
 def test_warning(tmpdir):  # #12424
