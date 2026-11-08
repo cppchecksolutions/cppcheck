@@ -238,6 +238,9 @@ public:
              const Token *typeEnd, nonneg int index_, AccessControl access_,
              const Type *type_, const Scope *scope_);
 
+    /** clang import: set initialization flags when the tokens after the name are added */
+    void clangSetInitialization();
+
     Variable(const Variable &var, const Scope *scope);
 
     Variable(const Variable &var);
@@ -761,6 +764,21 @@ class CPPCHECKLIB Function {
 public:
     Function(const Token *tok, const Scope *scope, const Token *tokDef, const Token *tokArgDef);
     Function(const Token *tokenDef, const std::string &clangType);
+
+    /** clang import: set flags that the normal symbol database gets from the tokens after the declaration */
+    void clangSetFlags(bool inlineDefinition, bool defaultFunction, bool deletedFunction) {
+        isInline(inlineDefinition);
+        isDefault(defaultFunction);
+        isDelete(deletedFunction);
+    }
+
+    /** clang import: virtual, pure, override and final specifiers */
+    void clangSetSpecifiers(bool virtualSpecifier, bool pure, bool overrideSpecifier, bool finalSpecifier) {
+        hasVirtualSpecifier(virtualSpecifier);
+        isPure(pure);
+        setFlag(fHasOverrideSpecifier, overrideSpecifier);
+        setFlag(fHasFinalSpecifier, finalSpecifier);
+    }
 
     const std::string &name() const {
         return tokenDef->str();
@@ -1443,6 +1461,8 @@ public:
     void setArrayDimensionsUsingValueFlow();
 
     void clangSetVariables(const std::vector<const Variable *> &vars);
+    /** clang import: fill in the information that is derived from the scopes and functions */
+    void clangCreateSymbolDatabaseInfo();
     void createSymbolDatabaseExprIds();
 
     /* returns the opening { if tok points to enum */

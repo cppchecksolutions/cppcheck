@@ -2389,6 +2389,13 @@ void SymbolDatabase::clangSetVariables(const std::vector<const Variable *> &vars
     mVariableList = vars;
 }
 
+void SymbolDatabase::clangCreateSymbolDatabaseInfo()
+{
+    createSymbolDatabaseCopyAndMoveConstructors();
+    createSymbolDatabaseClassAndStructScopes();
+    createSymbolDatabaseNeedInitialization();
+}
+
 void SymbolDatabase::debugSymbolDatabase() const
 {
     if (!mSettings.debugnormal && !mSettings.debugwarnings)
@@ -2432,9 +2439,11 @@ Variable::Variable(const Token *name_, const std::string &clangType, const Token
             mTypeStartToken = mTypeStartToken->previous();
     }
 
-    while (Token::Match(mTypeStartToken, "const|struct|static")) {
+    while (Token::Match(mTypeStartToken, "const|struct|enum|static|extern")) {
         if (mTypeStartToken->str() == "static")
             setFlag(fIsStatic, true);
+        else if (mTypeStartToken->str() == "extern")
+            setFlag(fIsExtern, true);
         mTypeStartToken = mTypeStartToken->next();
     }
 
@@ -2463,12 +2472,33 @@ Variable::Variable(const Token *name_, const std::string &clangType, const Token
         } while (pos < clangType.size() && clangType[pos] == '[');
     }
 
+    // class/struct variable: not a standard type, enum, pointer or reference
+    if (mTypeStartToken && !mTypeStartToken->isStandardType() && !(mType && mType->isEnumType())) {
+        bool pointerOrReference = false;
+        int templateLevel = 0;
+        for (const char c: clangType) {
+            if (c == '<')
+                ++templateLevel;
+            else if (c == '>')
+                --templateLevel;
+            else if (templateLevel == 0 && (c == '*' || c == '&' || c == '('))
+                pointerOrReference = true;
+        }
+        setFlag(fIsClass, !pointerOrReference);
+    }
+}
+
+void Variable::clangSetInitialization()
+{
     // Is there initialization in variable declaration
     const Token *initTok = mNameToken ? mNameToken->next() : nullptr;
     while (initTok && initTok->str() == "[")
         initTok = initTok->link()->next();
-    if (Token::Match(initTok, "=|{") || (initTok && initTok->isSplittedVarDeclEq()))
+    if (Token::Match(initTok, "=|{|(") || (initTok && initTok->isSplittedVarDeclEq()))
         setFlag(fIsInit, true);
+    // C++11 member initialization
+    if (mScope && mScope->isClassOrStruct() && Token::Match(initTok, "=|{"))
+        setFlag(fHasDefault, true);
 }
 
 Variable::Variable(const Variable &var, const Scope *scope)

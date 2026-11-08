@@ -701,7 +701,7 @@ unsigned int CppCheck::checkClang(const FileWithDetails &file)
     }
 #endif
 
-    const std::string args2 = "-fsyntax-only -Xclang -ast-dump -fno-color-diagnostics " +
+    const std::string args2 = "-fsyntax-only -Xclang -ast-dump=json -fno-color-diagnostics " +
                               getClangFlags(mSettings, file.lang()) +
                               file.spath();
     const std::string redirect2 = clangStderr.empty() ? "2>&1" : ("2> " + clangStderr);
@@ -748,12 +748,12 @@ unsigned int CppCheck::checkClang(const FileWithDetails &file)
             return 0; // TODO: report as failure?
     }
 
+    // the tokenizer is created before "try" so the token of an InternalError can be reported
+    TokenList tokenlist{mSettings, file.lang()};
+    tokenlist.appendFileIfNew(file.spath());
+    Tokenizer tokenizer(std::move(tokenlist), mErrorLogger);
     try {
-        TokenList tokenlist{mSettings, file.lang()};
-        tokenlist.appendFileIfNew(file.spath());
-        Tokenizer tokenizer(std::move(tokenlist), mErrorLogger);
-        std::istringstream ast(output2);
-        clangimport::parseClangAstDump(tokenizer, ast);
+        clangimport::parseClangAstDump(tokenizer, output2);
         ValueFlow::setValues(tokenizer.list,
                              const_cast<SymbolDatabase&>(*tokenizer.getSymbolDatabase()),
                              mErrorLogger,
@@ -786,7 +786,7 @@ unsigned int CppCheck::checkClang(const FileWithDetails &file)
         executeAddons(dumpFile, file);
 
     } catch (const InternalError &e) {
-        const ErrorMessage errmsg = ErrorMessage::fromInternalError(e, nullptr, file.spath(), "Bailing out from analysis: Processing Clang AST dump failed");
+        const ErrorMessage errmsg = ErrorMessage::fromInternalError(e, &tokenizer.list, file.spath(), "Bailing out from analysis: Processing Clang AST dump failed");
         mErrorLogger.reportErr(errmsg);
     } catch (const TerminateException &) {
         // Analysis is terminated

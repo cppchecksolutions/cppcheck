@@ -258,7 +258,7 @@ $(libcppdir)/checkunusedvar.o: ../lib/checkunusedvar.cpp ../lib/astutils.h ../li
 $(libcppdir)/checkvaarg.o: ../lib/checkvaarg.cpp ../lib/astutils.h ../lib/check.h ../lib/checkers.h ../lib/checkimpl.h ../lib/checkvaarg.h ../lib/config.h ../lib/errortypes.h ../lib/library.h ../lib/mathlib.h ../lib/platform.h ../lib/refthunk.h ../lib/settings.h ../lib/smallvector.h ../lib/sourcelocation.h ../lib/standards.h ../lib/symboldatabase.h ../lib/templatesimplifier.h ../lib/token.h ../lib/tokenize.h ../lib/tokenlist.h ../lib/utils.h ../lib/vfvalue.h
 	$(CXX) ${LIB_FUZZING_ENGINE} $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $(libcppdir)/checkvaarg.cpp
 
-$(libcppdir)/clangimport.o: ../lib/clangimport.cpp ../lib/clangimport.h ../lib/config.h ../lib/errortypes.h ../lib/library.h ../lib/mathlib.h ../lib/refthunk.h ../lib/smallvector.h ../lib/sourcelocation.h ../lib/standards.h ../lib/symboldatabase.h ../lib/templatesimplifier.h ../lib/token.h ../lib/tokenize.h ../lib/tokenlist.h ../lib/utils.h ../lib/vfvalue.h
+$(libcppdir)/clangimport.o: ../lib/clangimport.cpp ../externals/picojson/picojson.h ../externals/simplecpp/simplecpp.h ../lib/clangimport.h ../lib/config.h ../lib/errortypes.h ../lib/json.h ../lib/library.h ../lib/mathlib.h ../lib/refthunk.h ../lib/smallvector.h ../lib/sourcelocation.h ../lib/standards.h ../lib/symboldatabase.h ../lib/templatesimplifier.h ../lib/token.h ../lib/tokenize.h ../lib/tokenlist.h ../lib/utils.h ../lib/vfvalue.h
 	$(CXX) ${LIB_FUZZING_ENGINE} $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $(libcppdir)/clangimport.cpp
 
 $(libcppdir)/color.o: ../lib/color.cpp ../lib/color.h ../lib/config.h
