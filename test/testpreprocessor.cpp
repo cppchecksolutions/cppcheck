@@ -391,6 +391,8 @@ private:
         TEST_CASE(pragmaAsm);
 
         TEST_CASE(dumpPreprocessor);
+        TEST_CASE(dumpMacroUsageArg);
+        TEST_CASE(portabilityReports);
     }
 
     template<size_t size>
@@ -3299,6 +3301,39 @@ private:
             "    <if-cond file=\"test.cpp\" line=\"1\" column=\"2\" E=\"M == 0\" result=\"1\"/>\n"
             "  </simplecpp-if-cond>\n",
             ostr.str());
+    }
+    void dumpMacroUsageArg() {
+        const char code[] = "#define INT64_C(x) x ## LL\n"
+                            "#define F(x) x\n"
+                            "INT64_C(5) + F(1);\n";
+        std::vector<std::string> files;
+        simplecpp::OutputList outputList;
+        simplecpp::TokenList tokens1(code, files, "test.cpp", {}, &outputList);
+        Preprocessor preprocessor(tokens1, settingsDefault, *this, Standards::Language::CPP);
+        (void)preprocessor.preprocess("", files, outputList);
+        (void)preprocessor.reportOutput(outputList, true);
+
+        std::ostringstream ostr;
+        preprocessor.dump(ostr);
+        ASSERT_EQUALS(
+            "  <macro-usage>\n"
+            "    <macro name=\"INT64_C\" file=\"test.cpp\" line=\"1\" column=\"9\" usefile=\"test.cpp\" useline=\"3\" usecolumn=\"1\" is-known-value=\"true\" arg=\"5\"/>\n"
+            "    <macro name=\"F\" file=\"test.cpp\" line=\"2\" column=\"9\" usefile=\"test.cpp\" useline=\"3\" usecolumn=\"14\" is-known-value=\"true\"/>\n"
+            "  </macro-usage>\n",
+            ostr.str());
+    }
+
+    void portabilityReports() {
+        const char code[] = "#define A 1 \\ \n"
+                            "+ 2\n"
+                            "int x = A;";
+        const Settings settings = settingsBuilder().severity(Severity::portability).build();
+        (void)getcode(settings, *this, code);
+        ASSERT_EQUALS("[file.c:1:13]: (portability) Combination 'backslash space newline' is not portable. [simplecppPortabilityBackslash]\n"
+                      "[file.c:3:11]: (portability) No newline at end of file is undefined behavior in C. [simplecppPortabilityNoEofNewline]\n", errout_str());
+
+        (void)getcode(settingsDefault, *this, code);
+        ASSERT_EQUALS("", errout_str());
     }
 };
 
